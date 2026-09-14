@@ -32,6 +32,7 @@ type Config struct {
 	Mode           string  `toml:"mode"`
 	PublicListen   string  `toml:"public_listen"`
 	InternalListen string  `toml:"internal_listen"`
+	CachePath      string  `toml:"cache_path"`
 	Relays         Relays  `toml:"relays"`
 	Blossom        Blossom `toml:"blossom"`
 	Limits         Limits  `toml:"limits"`
@@ -75,6 +76,7 @@ func Defaults() *Config {
 		Mode:           "hosted",
 		PublicListen:   "127.0.0.1:8195",
 		InternalListen: "127.0.0.1:8196",
+		CachePath:      "/var/cache/nostrhost-nsite",
 		Relays: Relays{
 			Lookup:             []string{"wss://purplepag.es", "wss://user.kindpag.es"},
 			ManifestTTLSeconds: 300,
@@ -136,8 +138,11 @@ func (c *Config) Validate() error {
 	if len(all) == 0 {
 		return fmt.Errorf("at least one lookup or extra relay is required")
 	}
+	// Testbed-only relaxation for the Phase 0 spike harness (fake relay on
+	// loopback). Never set in production; D5 forbids loopback relays.
+	allowLoopback := os.Getenv("NSITE_ALLOW_LOOPBACK_RELAYS") == "1"
 	for _, r := range all {
-		if err := validateRelayURL(r); err != nil {
+		if err := validateRelayURL(r, allowLoopback); err != nil {
 			return fmt.Errorf("relay %q: %w", r, err)
 		}
 	}
@@ -158,6 +163,9 @@ func (c *Config) Validate() error {
 	if c.Limits.MaxPathsPerManifest <= 0 {
 		return fmt.Errorf("max_paths_per_manifest must be positive")
 	}
+	if c.CachePath == "" {
+		return fmt.Errorf("cache_path is required")
+	}
 	for _, site := range c.Sites {
 		if len(site.Pubkey) != 64 {
 			return fmt.Errorf("site pubkey %q must be 64 hex chars", site.Pubkey)
@@ -177,7 +185,7 @@ func validateListen(s string) error {
 	return nil
 }
 
-func validateRelayURL(raw string) error {
+func validateRelayURL(raw string, allowLoopback bool) error {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return err
@@ -188,7 +196,7 @@ func validateRelayURL(raw string) error {
 	if u.Host == "" {
 		return fmt.Errorf("missing host")
 	}
-	if forbiddenHost(u.Hostname()) {
+	if !allowLoopback && forbiddenHost(u.Hostname()) {
 		return fmt.Errorf("loopback/private relay URLs are not allowed (D5)")
 	}
 	return nil

@@ -7,6 +7,7 @@ domain = "sites.example.org"          # dedicated gateway domain (D2)
 mode = "hosted"                       # "open" is deferred to Phase 5 (D3)
 public_listen = "127.0.0.1:8195"      # Caddy -> gateway
 internal_listen = "127.0.0.1:8196"    # /internal/* (loopback only)
+cache_path = "/var/cache/nostrhost-nsite"
 
 [relays]                              # D5: no operator-specific relays
 lookup = ["wss://purplepag.es", "wss://user.kindpag.es"]

@@ -22,15 +22,23 @@ public relays and blobs from Blossom servers.
 cmd/nostrhost-nsite/   flags, config load, two listeners, SIGHUP reload
 internal/config/       TOML schema + validation (loopback relays rejected, D5)
 internal/nip5a/        label codec + manifest validation + aggregate hash
-internal/server/       public handler (host parse -> allowlist) and the
+internal/resolve/      manifest + BUD-03 lookup over public relays (newest wins)
+internal/blossom/      SSRF-safe blob fetcher: dial-time IP policy, redirect/
+                       byte/time caps, sha256 verified before any byte is served
+internal/cache/        content-addressed blob store (quota + eviction) and
+                       manifest positive/negative caches
+internal/server/       public handler (host -> site -> path -> blob, ETag/304,
+                       security headers, /404.html fallback) and the
                        loopback-only internal handler (healthz, tls-ask, status)
 deploy/                systemd unit, maintainer scripts, example config
 ```
 
-Manifest/blob resolution (`internal/resolve`, `internal/blossom`,
-`internal/cache`) and the public serving path are Phase 1.3; until then a
-decodable, allowlisted host gets a bounded 404 and `/internal/*` is never
-served publicly.
+Serving is complete: root/named sites resolve their manifests from the
+configured relays, fetch and verify blobs from `server` tags / BUD-03 / fallback
+servers, cache them content-addressed, and serve with content-type from the
+manifest path, `ETag: "<sha256>"` and `Cache-Control: public, max-age=3600`. A
+tampered blob is a bounded 404 (verify-before-serve, plan §4.1). `/internal/*`
+is never served on the public listener.
 
 ## Build and test
 
