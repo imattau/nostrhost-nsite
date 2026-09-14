@@ -102,10 +102,20 @@ pubkey = "b6c048759734c1ef1b3ba0acfd1cd862b394eaab1bc15b7bf6c7f357986d9732"
 	}
 }
 
-func TestLoadRejectsOpenMode(t *testing.T) {
-	_, err := Load(writeTemp(t, strings.Replace(validTOML, `mode = "hosted"`, `mode = "open"`, 1)))
-	if err == nil || !strings.Contains(err.Error(), "Phase 5") {
-		t.Fatalf("open mode must be rejected before Phase 5, got %v", err)
+func TestLoadAcceptsOpenMode(t *testing.T) {
+	cfg, err := Load(writeTemp(t, strings.Replace(validTOML, `mode = "hosted"`, `mode = "open"`, 1)))
+	if err != nil {
+		t.Fatalf("open mode must load from Phase 5, got %v", err)
+	}
+	if cfg.Mode != "open" {
+		t.Errorf("mode = %q, want open", cfg.Mode)
+	}
+}
+
+func TestLoadRejectsUnknownMode(t *testing.T) {
+	_, err := Load(writeTemp(t, strings.Replace(validTOML, `mode = "hosted"`, `mode = "banana"`, 1)))
+	if err == nil {
+		t.Fatal("unknown mode must be rejected")
 	}
 }
 

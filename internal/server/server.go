@@ -194,10 +194,18 @@ func (s *Server) parseHost(host string) (label string, siteType nip5a.SiteType, 
 	return label, siteType, hexID, d, ok
 }
 
-// allowlisted reports whether a resolved site is allowed in hosted mode.
+// allowlisted reports whether a resolved site is allowed to be served.
+//
+// Hosted mode: root/named must be on the operator's allowlist. Open mode
+// (Phase 5) serves any decodable label: the fork only enables open mode after
+// the operator supplied a DNS-01 API token (wildcard certificates), and it is
+// the exposure that mode promises, so there is no per-pubkey gate.
 func (s *Server) allowlisted(siteType nip5a.SiteType, pubkey string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if s.cfg.Mode == "open" {
+		return true
+	}
 	switch siteType {
 	case nip5a.SiteRoot, nip5a.SiteNamed:
 		_, ok := s.allow[pubkey]
@@ -271,8 +279,10 @@ func (s *Server) handleInternal(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleTLSAsk answers Caddy's on-demand TLS permission request. It performs
-// no network calls (plan §4.2): 200 only when the label decodes and, in hosted
-// mode, is allowlisted.
+// no network calls (plan §4.2): 200 when the label decodes and is allowed —
+// in hosted mode only allowlisted root/named sites, in open mode (Phase 5)
+// any decodable root/named label. Snapshot labels still answer 403 in both
+// modes: their author cannot be resolved without a network call.
 func (s *Server) handleTLSAsk(w http.ResponseWriter, r *http.Request) {
 	host := r.URL.Query().Get("domain")
 	if host == "" {

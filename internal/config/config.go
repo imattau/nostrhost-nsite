@@ -1,8 +1,10 @@
 // Package config loads and validates /etc/nostrhost/nsite.toml.
 //
 // Schema follows docs/NSITES-IMPLEMENTATION-PLAN.md §4.3. The validator
-// enforces D3 (only "hosted" mode before Phase 5) and D5 (no loopback or
-// private relay URLs).
+// enforces D3 (hosted mode before Phase 5; open mode from Phase 5) and D5 (no
+// loopback or private relay URLs). Open mode is operator-gated upstream: the
+// fork renders it only with a DNS-01 API token configured (wildcard
+// certificates), so the gateway accepts it once the operator has opted in.
 package config
 
 import (
@@ -135,9 +137,8 @@ func (c *Config) Validate() error {
 	switch c.Mode {
 	case "hosted":
 	case "open":
-		return fmt.Errorf("mode %q is deferred to Phase 5 (D3)", c.Mode)
 	default:
-		return fmt.Errorf("mode must be %q (D3), got %q", "hosted", c.Mode)
+		return fmt.Errorf("mode must be %q or %q (D3), got %q", "hosted", "open", c.Mode)
 	}
 	if err := validateListen(c.PublicListen); err != nil {
 		return fmt.Errorf("public_listen: %w", err)

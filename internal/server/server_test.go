@@ -95,6 +95,54 @@ func TestTLSAskDeniesSnapshotInHostedMode(t *testing.T) {
 	}
 }
 
+func openServer(t *testing.T) *Server {
+	t.Helper()
+	cfg := config.Defaults()
+	cfg.Domain = testDomain
+	cfg.Mode = "open"
+	cfg.Sites = nil
+	cfg.Relays.Lookup = []string{"wss://relay.example.org"}
+	return New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+func TestOpenModeTLSAskAllowsAnyDecodableLabel(t *testing.T) {
+	s := openServer(t)
+	unknown, _ := nip5a.NPub("0000000000000000000000000000000000000000000000000000000000000000")
+	for _, host := range []string{unknown + "." + testDomain, namedLabel(t) + "." + testDomain, testDomain} {
+		rr := do(s, "internal", host, "/internal/tls-ask?domain="+host)
+		if rr.Code != http.StatusOK {
+			t.Errorf("%s: open mode must allow any decodable root/named label, got %d", host, rr.Code)
+		}
+	}
+}
+
+func TestOpenModeStillDeniesSnapshotAndGarbage(t *testing.T) {
+	s := openServer(t)
+	snap, err := nip5a.SnapshotLabel("0000000000000000000000000000000000000000000000000000000000000001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []string{
+		snap + "." + testDomain,
+		"bogus." + testDomain,
+		"not-a-host!" + "." + testDomain,
+	}
+	for _, host := range cases {
+		rr := do(s, "internal", host, "/internal/tls-ask?domain="+host)
+		if rr.Code != http.StatusForbidden {
+			t.Errorf("%s: want 403 got %d", host, rr.Code)
+		}
+	}
+}
+
+func TestOpenModeStatusReportsMode(t *testing.T) {
+	s := openServer(t)
+	rr := do(s, "internal", "127.0.0.1", "/internal/status")
+	if body := rr.Body.String(); body != `{"domain":"sites.example.org","mode":"open","allowlisted_sites":0,"custom_domains":0,"cache_bytes":0}` {
+		t.Errorf("status body = %s", body)
+	}
+}
+
 func TestHealthz(t *testing.T) {
 	s := testServer(t)
 	rr := do(s, "internal", "127.0.0.1", "/healthz")
