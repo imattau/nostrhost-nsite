@@ -208,7 +208,7 @@ func TestNormalisePath(t *testing.T) {
 func TestManifestCacheShortCircuit(t *testing.T) {
 	ctx := context.Background()
 	pk, _ := nostr.GetPublicKey(serveSK)
-	mc := cache.NewManifestCache(3600, 60)
+	mc := cache.NewManifestCache(time.Hour, time.Minute)
 	ev := &nostr.Event{Kind: nip5a.KindRoot, PubKey: pk}
 	mc.Put("root:"+pk, ev)
 	r := resolve.New([]string{}, mc, nil, 5000) // no relays: cache must be the only path

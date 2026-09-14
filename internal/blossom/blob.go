@@ -41,6 +41,23 @@ type Fetcher struct {
 	client        *http.Client
 }
 
+// checkDialAddr is the resolved-IP boundary applied at dial time. It is
+// called by net.Dialer AFTER DNS resolution, with the actual address being
+// connected to — so DNS rebinding (a name that flips to a private IP after
+// resolution) is defeated here: the private address is refused regardless of
+// what the name resolved to earlier. allowLoopback is test/local tooling only.
+func checkDialAddr(network, addr string, allowLoopback bool) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return err
+	}
+	ip := net.ParseIP(host)
+	if ip != nil && !(allowLoopback && ip.IsLoopback()) && forbiddenIP(ip) {
+		return ErrForbidden
+	}
+	return nil
+}
+
 func New(opts Options) *Fetcher {
 	if opts.MaxBytes <= 0 {
 		opts.MaxBytes = 32 << 20
@@ -55,15 +72,7 @@ func New(opts Options) *Fetcher {
 	dialer := &net.Dialer{
 		Timeout: 10 * time.Second,
 		Control: func(network, addr string, _ syscall.RawConn) error {
-			host, _, err := net.SplitHostPort(addr)
-			if err != nil {
-				return err
-			}
-			ip := net.ParseIP(host)
-			if ip != nil && !(allowLoopback && ip.IsLoopback()) && forbiddenIP(ip) {
-				return ErrForbidden
-			}
-			return nil
+			return checkDialAddr(network, addr, allowLoopback)
 		},
 	}
 	transport := &http.Transport{
@@ -127,7 +136,11 @@ func (f *Fetcher) Fetch(ctx context.Context, serverURL, sha string) ([]byte, err
 	ctx, cancel := context.WithTimeout(ctx, f.timeout)
 	defer cancel()
 
-	resp, err := f.client.Get(target)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := f.client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -150,6 +163,37 @@ func (f *Fetcher) Fetch(ctx context.Context, serverURL, sha string) ([]byte, err
 		return nil, fmt.Errorf("blob hash mismatch: expected %s got %s", sha, got)
 	}
 	return buf.Bytes(), nil
+}
+
+// ClassifyFetchError buckets a fetch error into a small fixed set for the
+// /internal/metrics exposition. Unknown errors fall back to "network" so the
+// label set stays bounded.
+func ClassifyFetchError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, ErrForbidden) {
+		return "forbidden"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "canceled"
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "hash mismatch"):
+		return "hash"
+	case strings.Contains(msg, "exceeds"):
+		return "oversize"
+	case strings.Contains(msg, "too many redirects"):
+		return "redirect"
+	case strings.Contains(msg, "status"):
+		return "status"
+	default:
+		return "network"
+	}
 }
 
 func mustURL(s string) *url.URL {

@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -21,6 +22,7 @@ import (
 	"github.com/imattau/nostrhost-nsite/internal/blossom"
 	"github.com/imattau/nostrhost-nsite/internal/cache"
 	"github.com/imattau/nostrhost-nsite/internal/config"
+	"github.com/imattau/nostrhost-nsite/internal/metrics"
 	"github.com/imattau/nostrhost-nsite/internal/nip5a"
 	"github.com/imattau/nostrhost-nsite/internal/resolve"
 )
@@ -41,6 +43,14 @@ type Server struct {
 
 	public   *http.Server
 	internal *http.Server
+
+	m             *metrics.Registry
+	reqApex       *metrics.Counter
+	reqSite       *metrics.Counter
+	reqOther      *metrics.Counter
+	cacheHits     *metrics.Counter
+	fetchFailures *metrics.Counter
+	bytesServed   *metrics.Histogram
 }
 
 // New builds a server from the given config; call Configure and Reload as the
@@ -50,6 +60,13 @@ func New(cfg *config.Config, log *slog.Logger) *Server {
 		log = slog.Default()
 	}
 	s := &Server{log: log}
+	s.m = metrics.New()
+	s.reqApex = s.m.Counter("nostrhost_nsite_requests_total", "public requests by class", "class").With("apex")
+	s.reqSite = s.m.Counter("nostrhost_nsite_requests_total", "public requests by class", "class").With("site")
+	s.reqOther = s.m.Counter("nostrhost_nsite_requests_total", "public requests by class", "class").With("reject")
+	s.cacheHits = s.m.Counter("nostrhost_nsite_cache_hits_total", "blob served from the on-disk cache")
+	s.fetchFailures = s.m.Counter("nostrhost_nsite_fetch_failures_total", "blob fetch failures by class", "class")
+	s.bytesServed = s.m.Histogram("nostrhost_nsite_bytes_served", "response body bytes served", []float64{1024, 16 << 10, 256 << 10, 1 << 20, 4 << 20, 16 << 20})
 	s.apply(cfg)
 	return s
 }
@@ -167,27 +184,33 @@ func (s *Server) allowlisted(siteType nip5a.SiteType, pubkey string) bool {
 // handlePublic is the Caddy-facing site handler: host -> site -> path -> blob.
 func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/internal/") {
+		s.reqOther.Inc()
 		http.NotFound(w, r)
 		return
 	}
 	if s.isApex(r.Host) {
+		s.reqApex.Inc()
 		s.serveApex(w)
 		return
 	}
 	label, siteType, hexID, d, ok := s.parseHost(r.Host)
 	if !ok {
+		s.reqOther.Inc()
 		http.NotFound(w, r)
 		return
 	}
 	if !s.allowlisted(siteType, hexID) {
+		s.reqOther.Inc()
 		http.NotFound(w, r)
 		return
 	}
 	path, ok := normalisePath(r.URL.Path)
 	if !ok {
+		s.reqOther.Inc()
 		http.NotFound(w, r)
 		return
 	}
+	s.reqSite.Inc()
 	s.log.Debug("public request", "label", label, "path", path)
 	s.serveSite(w, r, siteType, hexID, d, path)
 }
@@ -210,6 +233,9 @@ func (s *Server) handleInternal(w http.ResponseWriter, r *http.Request) {
 		s.handleTLSAsk(w, r)
 	case "/internal/status":
 		s.handleStatus(w, r)
+	case "/internal/metrics":
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		_, _ = io.WriteString(w, s.m.Render())
 	default:
 		http.NotFound(w, r)
 	}
@@ -249,8 +275,12 @@ func (s *Server) handleTLSAsk(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	cacheBytes := int64(0)
+	if s.be.Blobs != nil {
+		cacheBytes = s.be.Blobs.Used()
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = fmt.Fprintf(w, `{"domain":%q,"mode":%q,"allowlisted_sites":%d}`, s.cfg.Domain, s.cfg.Mode, len(s.allow))
+	_, _ = fmt.Fprintf(w, `{"domain":%q,"mode":%q,"allowlisted_sites":%d,"cache_bytes":%d}`, s.cfg.Domain, s.cfg.Mode, len(s.allow), cacheBytes)
 }
 
 // serveSite resolves the manifest, matches the path, fetches and verifies the
@@ -297,6 +327,7 @@ func (s *Server) serveSite(w http.ResponseWriter, r *http.Request, siteType nip5
 // extension, never from upstream (plan §4.1). ETag is the sha256.
 func (s *Server) serveBlob(w http.ResponseWriter, r *http.Request, be Backends, event *nostr.Event, sha string, contentTypePath string, status int) {
 	if be.Blobs != nil && be.Blobs.Has(sha) {
+		s.cacheHits.Inc()
 		s.serveCached(w, r, be, sha, contentTypePath, status)
 		return
 	}
@@ -307,6 +338,7 @@ func (s *Server) serveBlob(w http.ResponseWriter, r *http.Request, be Backends, 
 	}
 	body, err := fetchFirst(r.Context(), be.Fetcher, servers, sha)
 	if err != nil || len(body) == 0 {
+		s.fetchFailures.With(blossom.ClassifyFetchError(err)).Inc()
 		http.NotFound(w, r)
 		return
 	}
@@ -336,6 +368,7 @@ func (s *Server) serveCached(w http.ResponseWriter, r *http.Request, be Backends
 }
 
 func (s *Server) serveBytes(w http.ResponseWriter, r *http.Request, sha, contentTypePath string, body []byte, status int) {
+	s.bytesServed.Observe(float64(len(body)))
 	etag := `"` + sha + `"`
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Content-Type", contentTypeFor(contentTypePath))
@@ -391,7 +424,7 @@ func normalisePath(p string) (string, bool) {
 	}
 	decoded = strings.Join(strings.Split(decoded, "//"), "/") // collapse //
 	for _, seg := range strings.Split(decoded, "/") {
-		if seg == ".." || strings.Contains(seg, "\\") {
+		if strings.Contains(seg, "..") || strings.Contains(seg, "\\") {
 			return "", false
 		}
 		for _, r := range seg {

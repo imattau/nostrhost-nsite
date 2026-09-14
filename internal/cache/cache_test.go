@@ -90,6 +90,45 @@ func TestBlobStoreQuotaEviction(t *testing.T) {
 	}
 }
 
+// TestBlobStoreEvictsLeastRecentlyUsed pins the LRU ordering: opening a blob
+// refreshes it, so the next eviction takes the oldest *untouched* blob, not
+// the newest-inserted one.
+func TestBlobStoreEvictsLeastRecentlyUsed(t *testing.T) {
+	dir := t.TempDir()
+	quota := int64(3000)
+	s, err := NewBlobStore(dir, quota)
+	if err != nil {
+		t.Fatal(err)
+	}
+	put := func(seed byte) string {
+		body := bytes.Repeat([]byte{seed}, 1000)
+		key := sha(string(body))
+		if _, err := s.Put(key, bytes.NewReader(body)); err != nil {
+			t.Fatal(err)
+		}
+		return key
+	}
+	a, b, c := put('a'), put('b'), put('c')
+	// Touching A makes it the most recently used; B becomes the LRU.
+	rc, err := s.Open(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = rc.Close()
+	put('d')
+	if s.Has(b) {
+		t.Fatal("LRU blob B must be evicted (A was touched)")
+	}
+	for _, k := range []string{a, c} {
+		if !s.Has(k) {
+			t.Fatalf("blob %q must survive eviction", k)
+		}
+	}
+	if s.Used() > quota {
+		t.Fatalf("used %d exceeds quota %d", s.Used(), quota)
+	}
+}
+
 func TestManifestCachePositiveNegative(t *testing.T) {
 	m := NewManifestCache(time.Hour, time.Hour)
 	ev := "kind-15128"

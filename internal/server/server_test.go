@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/imattau/nostrhost-nsite/internal/config"
@@ -108,8 +109,31 @@ func TestStatusJSON(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status: got %d", rr.Code)
 	}
-	if body := rr.Body.String(); body != `{"domain":"sites.example.org","mode":"hosted","allowlisted_sites":1}` {
+	if body := rr.Body.String(); body != `{"domain":"sites.example.org","mode":"hosted","allowlisted_sites":1,"cache_bytes":0}` {
 		t.Fatalf("status body: %s", body)
+	}
+}
+
+func TestMetricsExposition(t *testing.T) {
+	s := testServer(t)
+	// A real request should bump the site/reject counters and the bytes
+	// histogram; the exposition must then carry the metric families.
+	do(s, "public", "bogus."+testDomain, "/")
+	rr := do(s, "internal", "127.0.0.1", "/internal/metrics")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("metrics: got %d", rr.Code)
+	}
+	body := rr.Body.String()
+	for _, want := range []string{
+		`nostrhost_nsite_requests_total{class="reject"} 1`,
+		"# HELP nostrhost_nsite_cache_hits_total",
+		"# HELP nostrhost_nsite_bytes_served",
+		"# HELP nostrhost_nsite_fetch_failures_total",
+		"# TYPE nostrhost_nsite_requests_total counter",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %q in:\n%s", want, body)
+		}
 	}
 }
 
