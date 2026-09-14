@@ -1,0 +1,28 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+  remove)
+    if command -v deb-systemd-helper >/dev/null 2>&1; then
+      deb-systemd-helper disable nostrhost-nsite.service >/dev/null || true
+    fi
+    ;;
+  purge)
+    if command -v deb-systemd-helper >/dev/null 2>&1; then
+      deb-systemd-helper purge nostrhost-nsite.service >/dev/null || true
+    fi
+    rm -f /etc/nostrhost/nsite.toml
+    rm -rf /var/cache/nostrhost-nsite
+    if getent passwd nostrhost-nsite >/dev/null; then
+      deluser --system nostrhost-nsite >/dev/null 2>&1 || true
+    fi
+    if getent group nostrhost-nsite >/dev/null; then
+      delgroup --system nostrhost-nsite >/dev/null 2>&1 || true
+    fi
+    ;;
+esac
+
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload || true
+fi
+exit 0

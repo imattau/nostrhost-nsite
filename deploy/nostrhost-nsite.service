@@ -1,0 +1,39 @@
+[Unit]
+Description=NostrHost NIP-5A nsite gateway (optional)
+ConditionPathExists=/etc/nostrhost/nsite.toml
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nostrhost-nsite
+Group=nostrhost-nsite
+StateDirectory=nostrhost-nsite
+StateDirectoryMode=0700
+ExecStart=/usr/bin/nostrhost-nsite --config=/etc/nostrhost/nsite.toml
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/cache/nostrhost-nsite
+# The gateway's own listeners and Caddy both live on loopback, so a blanket
+# IPAddressDeny=127.0.0.0/8 would break the Caddy->gateway path. SSRF defence
+# (rejecting loopback/private upstreams at connect time) is enforced by the
+# resolver, which is Phase 2 hardening; the non-functional multicast/metadata
+# ranges are denied here as a first cut.
+IPAddressDeny=169.254.0.0/16
+IPAddressDeny=224.0.0.0/4
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,14 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+  remove|deconfigure)
+    if command -v deb-systemd-invoke >/dev/null 2>&1; then
+      deb-systemd-invoke stop nostrhost-nsite.service >/dev/null || true
+    fi
+    ;;
+  upgrade|failed-upgrade)
+    ;;
+esac
+
+exit 0

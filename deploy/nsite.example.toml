@@ -1,0 +1,35 @@
+# nostrhost-nsite example configuration.
+# Copy to /etc/nostrhost/nsite.toml (owned root:nostrhost-nsite, mode 0640).
+# Rendered from fork state (state/nsites/gateway.json) in production; the
+# gateway re-reads it on SIGHUP.
+
+domain = "sites.example.org"          # dedicated gateway domain (D2)
+mode = "hosted"                       # "open" is deferred to Phase 5 (D3)
+public_listen = "127.0.0.1:8195"      # Caddy -> gateway
+internal_listen = "127.0.0.1:8196"    # /internal/* (loopback only)
+
+[relays]                              # D5: no operator-specific relays
+lookup = ["wss://purplepag.es", "wss://user.kindpag.es"]
+extra = []
+manifest_ttl_seconds = 300
+negative_ttl_seconds = 60
+
+[blossom]
+fallback_servers = ["https://blossom.primal.net", "https://blossom.band"]
+allow_http = false
+
+[limits]                              # §4.4 hosted-mode defaults
+max_blob_bytes = 33554432             # 32 MiB (cap 128 MiB)
+fetch_timeout_seconds = 20
+fetch_concurrency = 8
+max_redirects = 3
+cache_quota_bytes = 2147483648        # 2 GiB
+max_paths_per_manifest = 5000
+requests_per_second = 50
+requests_burst = 200
+
+# Hosted-mode allowlist, rendered from state/nsites/sites/*.json.
+# [[sites]]
+# pubkey = "…64 hex…"
+# kind = 15128                        # 15128 root | 35128 named
+# d = ""

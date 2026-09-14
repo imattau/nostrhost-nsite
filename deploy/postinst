@@ -1,0 +1,20 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+  configure)
+    if ! getent group nostrhost-nsite >/dev/null; then
+      addgroup --system nostrhost-nsite
+    fi
+    if ! getent passwd nostrhost-nsite >/dev/null; then
+      adduser --system --ingroup nostrhost-nsite --no-create-home \
+        --home /nonexistent --shell /usr/sbin/nologin nostrhost-nsite
+    fi
+    install -d -o nostrhost-nsite -g nostrhost-nsite -m 0700 /var/cache/nostrhost-nsite
+    systemctl daemon-reload || true
+    ;;
+  abort-upgrade|abort-remove|abort-deconfigure|'')
+    ;;
+esac
+
+exit 0
