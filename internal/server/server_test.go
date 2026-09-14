@@ -109,7 +109,7 @@ func TestStatusJSON(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status: got %d", rr.Code)
 	}
-	if body := rr.Body.String(); body != `{"domain":"sites.example.org","mode":"hosted","allowlisted_sites":1,"cache_bytes":0}` {
+	if body := rr.Body.String(); body != `{"domain":"sites.example.org","mode":"hosted","allowlisted_sites":1,"custom_domains":0,"cache_bytes":0}` {
 		t.Fatalf("status body: %s", body)
 	}
 }
@@ -166,5 +166,74 @@ func TestReloadSwapsAllowlist(t *testing.T) {
 	s.Reload(cfg) // allowlist now empty
 	if rr := do(s, "internal", npub(t)+"."+testDomain, "/internal/tls-ask?domain="+npub(t)+"."+testDomain); rr.Code != http.StatusForbidden {
 		t.Fatalf("after reload: want 403 got %d", rr.Code)
+	}
+}
+
+func testServerWithCustom(t *testing.T, d string) *Server {
+	t.Helper()
+	cfg := config.Defaults()
+	cfg.Domain = testDomain
+	cfg.Sites = []config.Site{{Pubkey: testPubkey, Kind: nip5a.KindRoot, D: ""}}
+	cfg.CustomDomains = []config.CustomDomain{{
+		FQDN:   "blog.example.com",
+		Pubkey: testPubkey,
+		D:      d,
+	}}
+	cfg.Relays.Lookup = []string{"wss://relay.example.org"}
+	return New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+func TestParseHostCustomDomain(t *testing.T) {
+	s := testServerWithCustom(t, "")
+	label, siteType, hexID, d, ok := s.parseHost("blog.example.com")
+	if !ok || siteType != nip5a.SiteRoot || hexID != testPubkey || d != "" || label != "blog.example.com" {
+		t.Fatalf("root custom host: got (%q, %s, %s, %q, %v)", label, siteType, hexID, d, ok)
+	}
+	_, _, _, _, ok = s.parseHost("other.example.com")
+	if ok {
+		t.Fatal("non-attached host must not parse")
+	}
+}
+
+func TestParseHostCustomDomainNamed(t *testing.T) {
+	s := testServerWithCustom(t, "blog")
+	_, siteType, hexID, d, ok := s.parseHost("blog.example.com")
+	if !ok || siteType != nip5a.SiteNamed || hexID != testPubkey || d != "blog" {
+		t.Fatalf("named custom host: got (%s, %s, %q, %v)", siteType, hexID, d, ok)
+	}
+}
+
+func TestTLSAskAllowsCustomDomain(t *testing.T) {
+	s := testServerWithCustom(t, "")
+	rr := do(s, "internal", "blog.example.com", "/internal/tls-ask?domain=blog.example.com")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("attached custom domain: want 200 got %d", rr.Code)
+	}
+}
+
+func TestTLSAskDeniesNonAttachedCustomDomain(t *testing.T) {
+	s := testServer(t)
+	rr := do(s, "internal", "blog.example.com", "/internal/tls-ask?domain=blog.example.com")
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("non-attached custom domain: want 403 got %d", rr.Code)
+	}
+}
+
+func TestPublicCustomDomainIsServedAsSite(t *testing.T) {
+	// An attached custom host must reach the site path (nil resolver -> 404
+	// through serveSite) and must not be counted as a reject; a non-attached
+	// custom host is a plain reject.
+	s := testServerWithCustom(t, "")
+	rr := do(s, "public", "blog.example.com", "/")
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("attached custom host with nil resolver: want 404 got %d", rr.Code)
+	}
+	do(s, "public", "other.example.com", "/")
+	body := do(s, "internal", "127.0.0.1", "/internal/metrics").Body.String()
+	if !strings.Contains(body, `nostrhost_nsite_requests_total{class="site"} 1`) {
+		t.Fatalf("attached custom host must count as a site request:\n%s", body)
+	}
+	if !strings.Contains(body, `nostrhost_nsite_requests_total{class="reject"} 1`) {
+		t.Fatalf("non-attached custom host must count as a reject:\n%s", body)
 	}
 }

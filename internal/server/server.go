@@ -35,11 +35,12 @@ type Backends struct {
 }
 
 type Server struct {
-	log   *slog.Logger
-	mu    sync.RWMutex
-	cfg   *config.Config
-	allow map[string]struct{} // allowlisted pubkeys (hosted mode)
-	be    Backends
+	log    *slog.Logger
+	mu     sync.RWMutex
+	cfg    *config.Config
+	allow  map[string]struct{}   // allowlisted pubkeys (hosted mode)
+	custom map[string]customSite // attached FQDNs (Phase 4) -> mapped site
+	be     Backends
 
 	public   *http.Server
 	internal *http.Server
@@ -71,6 +72,13 @@ func New(cfg *config.Config, log *slog.Logger) *Server {
 	return s
 }
 
+// customSite is the site a custom FQDN maps to (Phase 4).
+type customSite struct {
+	siteType nip5a.SiteType
+	pubkey   string
+	d        string
+}
+
 func (s *Server) apply(cfg *config.Config) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -80,6 +88,19 @@ func (s *Server) apply(cfg *config.Config) {
 		allow[site.Pubkey] = struct{}{}
 	}
 	s.allow = allow
+	custom := make(map[string]customSite, len(cfg.CustomDomains))
+	for _, cd := range cfg.CustomDomains {
+		siteType := nip5a.SiteRoot
+		if cd.D != "" {
+			siteType = nip5a.SiteNamed
+		}
+		custom[strings.ToLower(strings.TrimSuffix(cd.FQDN, "."))] = customSite{
+			siteType: siteType,
+			pubkey:   cd.Pubkey,
+			d:        cd.D,
+		}
+	}
+	s.custom = custom
 }
 
 // Configure installs the resolution backends. Call once after the config is
@@ -143,7 +164,8 @@ func (s *Server) isApex(host string) bool {
 }
 
 // parseHost resolves a request Host header to a site label + type. ok is false
-// for the apex and any non-site host.
+// for the apex and any non-site host. An attached custom FQDN (Phase 4) maps
+// to the site it was verified against, served under that site's identity.
 func (s *Server) parseHost(host string) (label string, siteType nip5a.SiteType, hexID, d string, ok bool) {
 	s.mu.RLock()
 	domain := s.cfg.Domain
@@ -155,6 +177,13 @@ func (s *Server) parseHost(host string) (label string, siteType nip5a.SiteType, 
 	}
 	suffix := "." + domain
 	if !strings.HasSuffix(host, suffix) {
+		// Phase 4: an attached custom FQDN is served as the site it maps to.
+		s.mu.RLock()
+		cs, mapped := s.custom[host]
+		s.mu.RUnlock()
+		if mapped {
+			return host, cs.siteType, cs.pubkey, cs.d, true
+		}
 		return "", "", "", "", false
 	}
 	label = host[:len(host)-len(suffix)]
@@ -280,7 +309,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		cacheBytes = s.be.Blobs.Used()
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = fmt.Fprintf(w, `{"domain":%q,"mode":%q,"allowlisted_sites":%d,"cache_bytes":%d}`, s.cfg.Domain, s.cfg.Mode, len(s.allow), cacheBytes)
+	_, _ = fmt.Fprintf(w, `{"domain":%q,"mode":%q,"allowlisted_sites":%d,"custom_domains":%d,"cache_bytes":%d}`, s.cfg.Domain, s.cfg.Mode, len(s.allow), len(s.custom), cacheBytes)
 }
 
 // serveSite resolves the manifest, matches the path, fetches and verifies the

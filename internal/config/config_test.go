@@ -54,6 +54,54 @@ func TestLoadValid(t *testing.T) {
 	}
 }
 
+func TestLoadCustomDomains(t *testing.T) {
+	body := validTOML + `
+[[custom_domains]]
+fqdn = "blog.example.com"
+pubkey = "b6c048759734c1ef1b3ba0acfd1cd862b394eaab1bc15b7bf6c7f357986d9732"
+d = "blog"
+`
+	cfg, err := Load(writeTemp(t, body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.CustomDomains) != 1 {
+		t.Fatalf("custom_domains not parsed: %+v", cfg.CustomDomains)
+	}
+	if cd := cfg.CustomDomains[0]; cd.FQDN != "blog.example.com" || cd.D != "blog" || cd.Pubkey == "" {
+		t.Fatalf("bad custom domain: %+v", cd)
+	}
+}
+
+func TestLoadRejectsBadCustomDomains(t *testing.T) {
+	good := "\npubkey = \"b6c048759734c1ef1b3ba0acfd1cd862b394eaab1bc15b7bf6c7f357986d9732\"\n"
+	bad := map[string]string{
+		"overlap gateway domain": `fqdn = "sites.example.org"` + good,
+		"subdomain of gateway":   `fqdn = "blog.sites.example.org"` + good,
+		"parent of gateway":      `fqdn = "example.org"` + good,
+		"invalid hostname":       `fqdn = "under_score.example.com"` + good,
+		"short pubkey":           `fqdn = "ok.example.com"` + "\npubkey = \"abc\"",
+	}
+	for name, block := range bad {
+		body := validTOML + "\n[[custom_domains]]\n" + block
+		if _, err := Load(writeTemp(t, body)); err == nil {
+			t.Errorf("%s: must be rejected", name)
+		}
+	}
+	dup := validTOML + `
+[[custom_domains]]
+fqdn = "blog.example.com"
+pubkey = "b6c048759734c1ef1b3ba0acfd1cd862b394eaab1bc15b7bf6c7f357986d9732"
+
+[[custom_domains]]
+fqdn = "blog.example.com"
+pubkey = "b6c048759734c1ef1b3ba0acfd1cd862b394eaab1bc15b7bf6c7f357986d9732"
+`
+	if _, err := Load(writeTemp(t, dup)); err == nil {
+		t.Error("duplicate custom fqdn must be rejected")
+	}
+}
+
 func TestLoadRejectsOpenMode(t *testing.T) {
 	_, err := Load(writeTemp(t, strings.Replace(validTOML, `mode = "hosted"`, `mode = "open"`, 1)))
 	if err == nil || !strings.Contains(err.Error(), "Phase 5") {

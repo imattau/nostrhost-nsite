@@ -28,15 +28,16 @@ const (
 )
 
 type Config struct {
-	Domain         string  `toml:"domain"`
-	Mode           string  `toml:"mode"`
-	PublicListen   string  `toml:"public_listen"`
-	InternalListen string  `toml:"internal_listen"`
-	CachePath      string  `toml:"cache_path"`
-	Relays         Relays  `toml:"relays"`
-	Blossom        Blossom `toml:"blossom"`
-	Limits         Limits  `toml:"limits"`
-	Sites          []Site  `toml:"sites"`
+	Domain         string         `toml:"domain"`
+	Mode           string         `toml:"mode"`
+	PublicListen   string         `toml:"public_listen"`
+	InternalListen string         `toml:"internal_listen"`
+	CachePath      string         `toml:"cache_path"`
+	Relays         Relays         `toml:"relays"`
+	Blossom        Blossom        `toml:"blossom"`
+	Limits         Limits         `toml:"limits"`
+	Sites          []Site         `toml:"sites"`
+	CustomDomains  []CustomDomain `toml:"custom_domains"`
 }
 
 type Relays struct {
@@ -66,6 +67,16 @@ type Limits struct {
 type Site struct {
 	Pubkey string `toml:"pubkey"`
 	Kind   int    `toml:"kind"`
+	D      string `toml:"d"`
+}
+
+// CustomDomain is an attached FQDN (Phase 4) mapped to a registered site.
+// The fork verifies ownership (TXT challenge or CNAME to the gateway domain)
+// before rendering an entry here; the gateway simply serves the mapped site
+// for that host and answers Caddy's on-demand TLS ask positively.
+type CustomDomain struct {
+	FQDN   string `toml:"fqdn"`
+	Pubkey string `toml:"pubkey"`
 	D      string `toml:"d"`
 }
 
@@ -169,6 +180,29 @@ func (c *Config) Validate() error {
 	for _, site := range c.Sites {
 		if len(site.Pubkey) != 64 {
 			return fmt.Errorf("site pubkey %q must be 64 hex chars", site.Pubkey)
+		}
+	}
+	seen := make(map[string]struct{}, len(c.CustomDomains))
+	for _, cd := range c.CustomDomains {
+		if cd.FQDN == "" {
+			return fmt.Errorf("custom_domains: fqdn is required")
+		}
+		fqdn := strings.ToLower(strings.TrimSuffix(cd.FQDN, "."))
+		if !hostnameRe.MatchString(fqdn) {
+			return fmt.Errorf("custom_domains: fqdn %q is not a valid hostname", cd.FQDN)
+		}
+		if fqdn == c.Domain || strings.HasSuffix(fqdn, "."+c.Domain) {
+			return fmt.Errorf("custom_domains: fqdn %q overlaps the gateway domain", cd.FQDN)
+		}
+		if strings.HasSuffix(c.Domain, "."+fqdn) {
+			return fmt.Errorf("custom_domains: fqdn %q is a parent of the gateway domain", cd.FQDN)
+		}
+		if _, dup := seen[fqdn]; dup {
+			return fmt.Errorf("custom_domains: duplicate fqdn %q", cd.FQDN)
+		}
+		seen[fqdn] = struct{}{}
+		if len(cd.Pubkey) != 64 {
+			return fmt.Errorf("custom_domains: fqdn %q pubkey %q must be 64 hex chars", cd.FQDN, cd.Pubkey)
 		}
 	}
 	return nil
