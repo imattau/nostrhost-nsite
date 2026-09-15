@@ -47,24 +47,7 @@ func (r *Resolver) Manifest(ctx context.Context, siteType nip5a.SiteType, pubkey
 		return nil, nil
 	}
 
-	pool := nostr.NewSimplePool(ctx)
-	defer pool.Close("done")
-
-	best := (*nostr.Event)(nil)
-	seen := map[string]struct{}{}
-	for hit := range pool.SubManyEose(ctx, r.relays, nostr.Filters{filter}) {
-		if hit.Event == nil {
-			continue
-		}
-		if _, dup := seen[hit.Event.ID]; dup {
-			continue
-		}
-		seen[hit.Event.ID] = struct{}{}
-		if best != nil && hit.Event.CreatedAt <= best.CreatedAt {
-			continue
-		}
-		best = hit.Event
-	}
+	best := newestEvent(ctx, r.relays, filter, true)
 	if best == nil {
 		r.mcache.PutNegative(key)
 		return nil, nil
@@ -84,18 +67,8 @@ func (r *Resolver) Manifest(ctx context.Context, siteType nip5a.SiteType, pubkey
 func (r *Resolver) BlossomServers(ctx context.Context, pubkey string) []string {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	pool := nostr.NewSimplePool(ctx)
-	defer pool.Close("done")
 
-	best := (*nostr.Event)(nil)
-	for hit := range pool.SubManyEose(ctx, r.relays, nostr.Filters{{Kinds: []int{10063}, Authors: []string{pubkey}}}) {
-		if hit.Event == nil {
-			continue
-		}
-		if best == nil || hit.Event.CreatedAt > best.CreatedAt {
-			best = hit.Event
-		}
-	}
+	best := newestEvent(ctx, r.relays, nostr.Filter{Kinds: []int{10063}, Authors: []string{pubkey}}, false)
 	if best == nil {
 		return nil
 	}
@@ -106,6 +79,38 @@ func (r *Resolver) BlossomServers(ctx context.Context, pubkey string) []string {
 		}
 	}
 	return servers
+}
+
+// newestEvent subscribes to relays with the given filter and returns the
+// event with the highest CreatedAt seen before EOSE, or nil if none matched.
+// When dedupeByID is true, repeated deliveries of the same event ID are
+// skipped before the newest-wins comparison.
+func newestEvent(ctx context.Context, relays []string, filter nostr.Filter, dedupeByID bool) *nostr.Event {
+	pool := nostr.NewSimplePool(ctx)
+	defer pool.Close("done")
+
+	var seen map[string]struct{}
+	if dedupeByID {
+		seen = map[string]struct{}{}
+	}
+
+	best := (*nostr.Event)(nil)
+	for hit := range pool.SubManyEose(ctx, relays, nostr.Filters{filter}) {
+		if hit.Event == nil {
+			continue
+		}
+		if dedupeByID {
+			if _, dup := seen[hit.Event.ID]; dup {
+				continue
+			}
+			seen[hit.Event.ID] = struct{}{}
+		}
+		if best != nil && hit.Event.CreatedAt <= best.CreatedAt {
+			continue
+		}
+		best = hit.Event
+	}
+	return best
 }
 
 func keyAndFilter(siteType nip5a.SiteType, pubkey, d, id string) (string, nostr.Filter, error) {
