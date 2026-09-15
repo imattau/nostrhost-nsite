@@ -220,16 +220,35 @@ func validateListen(s string) error {
 	return nil
 }
 
-func validateRelayURL(raw string, allowLoopback bool) error {
+// validateURL parses raw and checks its scheme against allowedSchemes,
+// optionally requiring a non-empty host. It returns the parsed URL so
+// callers can perform further scheme-specific checks (e.g. loopback
+// rejection) without reparsing.
+func validateURL(raw string, allowedSchemes []string, requireHost bool) (*url.URL, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
+		return nil, err
+	}
+	ok := false
+	for _, scheme := range allowedSchemes {
+		if u.Scheme == scheme {
+			ok = true
+			break
+		}
+	}
+	if !ok {
+		return nil, fmt.Errorf("scheme must be one of %v, got %q", allowedSchemes, u.Scheme)
+	}
+	if requireHost && u.Host == "" {
+		return nil, fmt.Errorf("missing host")
+	}
+	return u, nil
+}
+
+func validateRelayURL(raw string, allowLoopback bool) error {
+	u, err := validateURL(raw, []string{"ws", "wss"}, true)
+	if err != nil {
 		return err
-	}
-	if u.Scheme != "ws" && u.Scheme != "wss" {
-		return fmt.Errorf("scheme must be ws or wss, got %q", u.Scheme)
-	}
-	if u.Host == "" {
-		return fmt.Errorf("missing host")
 	}
 	if !allowLoopback && forbiddenHost(u.Hostname()) {
 		return fmt.Errorf("loopback/private relay URLs are not allowed (D5)")
@@ -238,20 +257,12 @@ func validateRelayURL(raw string, allowLoopback bool) error {
 }
 
 func validateBlossomURL(raw string, allowHTTP bool) error {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return err
+	schemes := []string{"https"}
+	if allowHTTP {
+		schemes = append(schemes, "http")
 	}
-	if u.Scheme == "http" && !allowHTTP {
-		return fmt.Errorf("http requires allow_http = true")
-	}
-	if u.Scheme != "https" && u.Scheme != "http" {
-		return fmt.Errorf("scheme must be https (or http with allow_http), got %q", u.Scheme)
-	}
-	if u.Host == "" {
-		return fmt.Errorf("missing host")
-	}
-	return nil
+	_, err := validateURL(raw, schemes, true)
+	return err
 }
 
 // forbiddenHost reports loopback and private addresses. Hostnames that are

@@ -221,8 +221,7 @@ func (s *Server) allowlisted(siteType nip5a.SiteType, pubkey string) bool {
 // handlePublic is the Caddy-facing site handler: host -> site -> path -> blob.
 func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/internal/") {
-		s.reqOther.Inc()
-		http.NotFound(w, r)
+		s.reject(w, r)
 		return
 	}
 	if s.isApex(r.Host) {
@@ -232,24 +231,27 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 	}
 	label, siteType, hexID, d, ok := s.parseHost(r.Host)
 	if !ok {
-		s.reqOther.Inc()
-		http.NotFound(w, r)
+		s.reject(w, r)
 		return
 	}
 	if !s.allowlisted(siteType, hexID) {
-		s.reqOther.Inc()
-		http.NotFound(w, r)
+		s.reject(w, r)
 		return
 	}
 	path, ok := normalisePath(r.URL.Path)
 	if !ok {
-		s.reqOther.Inc()
-		http.NotFound(w, r)
+		s.reject(w, r)
 		return
 	}
 	s.reqSite.Inc()
 	s.log.Debug("public request", "label", label, "path", path)
 	s.serveSite(w, r, siteType, hexID, d, path)
+}
+
+// reject counts a rejected public request and answers with a bounded 404.
+func (s *Server) reject(w http.ResponseWriter, r *http.Request) {
+	s.reqOther.Inc()
+	http.NotFound(w, r)
 }
 
 func (s *Server) serveApex(w http.ResponseWriter) {
@@ -394,15 +396,7 @@ func (s *Server) serveCached(w http.ResponseWriter, r *http.Request, be Backends
 		return
 	}
 	defer rc.Close()
-	buf := make([]byte, 0, 4096)
-	tmp := make([]byte, 4096)
-	for {
-		n, err := rc.Read(tmp)
-		buf = append(buf, tmp[:n]...)
-		if err != nil {
-			break
-		}
-	}
+	buf, _ := io.ReadAll(rc)
 	s.serveBytes(w, r, sha, contentTypePath, buf, status)
 }
 

@@ -219,6 +219,14 @@ func Validate(ev *nostr.Event, opts Options) Verdict {
 		}
 	}
 
+	// The "a" tag (self-reference) and "A" tag (root-of-snapshot reference)
+	// are validated together: presence/count of each is checked once, then
+	// each tag's shape is checked independently. missing_a covers both "no a
+	// tag at all" and "A present without a" (the latter can only happen when
+	// aTags is already empty, so it collapses into the same check); the
+	// final error list is deduped below, so the two original code paths that
+	// both produced missing_a for that case are equivalent to this single
+	// check.
 	aTags := filterTags(ev.Tags, "a")
 	ATags := filterTags(ev.Tags, "A")
 	if kind == KindSnapshot || len(aTags) > 0 || len(ATags) > 0 {
@@ -228,13 +236,11 @@ func Validate(ev *nostr.Event, opts Options) Verdict {
 		case len(aTags) > 1:
 			errors = append(errors, "multiple_a")
 		}
-		if len(aTags) > 0 && len(ATags) == 0 && kind != KindSnapshot {
-			errors = append(errors, "missing_A")
-		} else if len(ATags) > 0 && len(aTags) == 0 {
-			errors = append(errors, "missing_a")
-		}
 		if len(ATags) > 1 {
 			errors = append(errors, "multiple_A")
+		}
+		if len(aTags) > 0 && len(ATags) == 0 && kind != KindSnapshot {
+			errors = append(errors, "missing_A")
 		}
 		for _, t := range aTags {
 			if len(t) < 2 || !reRef.MatchString(t[1]) {
