@@ -21,6 +21,7 @@ import (
 
 func main() {
 	configPath := flag.String("config", "/etc/nostrhost/nsite.toml", "path to nsite.toml")
+	checkOnly := flag.Bool("check-config", false, "load and validate the config, then exit (used by the config projector before atomic replace)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -29,6 +30,14 @@ func main() {
 	if err != nil {
 		log.Error("load config", "err", err)
 		os.Exit(1)
+	}
+
+	if *checkOnly {
+		// Native config checker for WP7: the Python projector shells to this
+		// before writing nsite.toml, so a render that the gateway would refuse
+		// is never installed. Exits 0 only when Load+Validate succeed.
+		log.Info("config ok", "mode", cfg.Mode, "domain", cfg.Domain)
+		return
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
