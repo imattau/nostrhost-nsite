@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/imattau/nostrhost-nsite/internal/config"
+	"github.com/imattau/nostrhost-nsite/internal/metrics"
 	"github.com/imattau/nostrhost-nsite/internal/nip5a"
 )
 
@@ -171,17 +172,37 @@ func TestMetricsExposition(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("metrics: got %d", rr.Code)
 	}
+	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Fatalf("metrics content type: %q", ct)
+	}
 	body := rr.Body.String()
 	for _, want := range []string{
 		`nostrhost_nsite_requests_total{class="reject"} 1`,
 		"# HELP nostrhost_nsite_cache_hits_total",
 		"# HELP nostrhost_nsite_bytes_served",
-		"# HELP nostrhost_nsite_fetch_failures_total",
 		"# TYPE nostrhost_nsite_requests_total counter",
+		"# TYPE nostrhost_nsite_bytes_served histogram",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("missing %q in:\n%s", want, body)
 		}
+	}
+}
+
+func TestMetricsFetchFailureFamily(t *testing.T) {
+	// A labelled family only appears in the exposition once a label set is
+	// instantiated. Trigger a fetch failure through the public path and the
+	// class-labelled counter must show up with a value.
+	r := metrics.New()
+	fam := r.Counter("nostrhost_nsite_fetch_failures_total", "blob fetch failures by class", "class")
+	// Before any With(), the family is absent from the exposition.
+	if out := r.Render(); strings.Contains(out, "nostrhost_nsite_fetch_failures_total") {
+		t.Fatalf("unused labelled family leaked into exposition:\n%s", out)
+	}
+	fam.With("network").Inc()
+	out := r.Render()
+	if !strings.Contains(out, `nostrhost_nsite_fetch_failures_total{class="network"} 1`) {
+		t.Fatalf("missing class counter:\n%s", out)
 	}
 }
 

@@ -273,8 +273,7 @@ func (s *Server) handleInternal(w http.ResponseWriter, r *http.Request) {
 	case "/internal/status":
 		s.handleStatus(w, r)
 	case "/internal/metrics":
-		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-		_, _ = io.WriteString(w, s.m.Render())
+		s.m.Handler().ServeHTTP(w, r)
 	default:
 		http.NotFound(w, r)
 	}

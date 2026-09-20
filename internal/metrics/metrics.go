@@ -1,15 +1,19 @@
-// Package metrics is a tiny dependency-free counters/histograms registry for
-// the gateway, rendered as Prometheus text format on the loopback /internal
-// endpoint. The exposition is deliberate: no third-party client library, just
-// monotonic counters and fixed buckets, matching the plan's "counters/
-// histograms (requests, cache hits, fetch failures by class, bytes served)".
+// Package metrics provides the gateway's Prometheus instrumentation. The
+// counters, histograms and registry are backed by the official client_golang
+// collectors and served through promhttp.HandlerFor on the loopback /internal
+// endpoint. Metric names, labels, buckets and the text exposition (version
+// 0.0.4) are preserved from the previous dependency-free registry so scrape
+// consumers see an identical surface.
 package metrics
 
 import (
 	"fmt"
-	"sort"
-	"strings"
+	"net/http"
+	"net/http/httptest"
 	"sync"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // Counter is a monotonic counter, optionally labelled. A family is created by
@@ -17,91 +21,83 @@ import (
 // label set is validated once at With-time (wrong arity panics), so a
 // mismatched label set cannot silently mis-record.
 type Counter struct {
-	name, help string
-	labelKeys  []string
+	name      string
+	labelKeys []string
 
-	mu     *sync.Mutex
-	values map[string]int64 // label-set key -> value
-	fixed  string           // "" for the family, or the scoped label-set key
+	mu  *sync.Mutex
+	vec *prometheus.CounterVec
+	cur prometheus.Counter // scoped view (nil on the family handle)
 }
 
-func (c *Counter) key(labelValues []string) string {
-	return strings.Join(labelValues, "\x00")
-}
-
-// With returns a scoped view of this counter for the given label values.
 func (c *Counter) With(labelValues ...string) *Counter {
 	if len(labelValues) != len(c.labelKeys) {
 		panic(fmt.Sprintf("counter %s: got %d label values, want %d", c.name, len(labelValues), len(c.labelKeys)))
 	}
-	return &Counter{name: c.name, help: c.help, labelKeys: c.labelKeys, values: c.values, mu: c.mu, fixed: c.key(labelValues)}
+	labels := make(prometheus.Labels, len(c.labelKeys))
+	for i, k := range c.labelKeys {
+		labels[k] = labelValues[i]
+	}
+	return &Counter{name: c.name, labelKeys: c.labelKeys, mu: c.mu, vec: c.vec, cur: c.vec.With(labels)}
 }
 
 func (c *Counter) Add(n int64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.values[c.fixed] += n
+	if c.cur == nil {
+		// Unlabelled family: resolve the single child once, then add.
+		if len(c.labelKeys) != 0 {
+			panic(fmt.Sprintf("counter %s: Add called on a labelled family; use With() first", c.name))
+		}
+		c.cur = c.vec.With(prometheus.Labels{})
+	}
+	c.cur.Add(float64(n))
 }
 
 func (c *Counter) Inc() { c.Add(1) }
 
 // Histogram is a fixed-bucket histogram over an observation distribution.
 type Histogram struct {
-	name, help string
-	labelKeys  []string
-	buckets    []float64 // ascending upper bounds
+	name      string
+	labelKeys []string
 
-	mu     *sync.Mutex
-	counts map[string][]int64 // label-set key -> per-bucket counts
-	sums   map[string]float64
-	obs    map[string]int64
-	fixed  string
+	mu  *sync.Mutex
+	vec *prometheus.HistogramVec
+	cur prometheus.Observer // scoped view (nil on the family handle)
 }
 
 func (h *Histogram) With(labelValues ...string) *Histogram {
 	if len(labelValues) != len(h.labelKeys) {
 		panic(fmt.Sprintf("histogram %s: got %d label values, want %d", h.name, len(labelValues), len(h.labelKeys)))
 	}
-	return &Histogram{
-		name: h.name, help: h.help, labelKeys: h.labelKeys, buckets: h.buckets,
-		mu: h.mu, counts: h.counts, sums: h.sums, obs: h.obs, fixed: strings.Join(labelValues, "\x00"),
+	labels := make(prometheus.Labels, len(h.labelKeys))
+	for i, k := range h.labelKeys {
+		labels[k] = labelValues[i]
 	}
+	return &Histogram{name: h.name, labelKeys: h.labelKeys, mu: h.mu, vec: h.vec, cur: h.vec.With(labels)}
 }
 
 func (h *Histogram) Observe(v float64) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	counts := h.counts[h.fixed]
-	if counts == nil {
-		counts = make([]int64, len(h.buckets))
-		h.counts[h.fixed] = counts
-	}
-	idx := 0
-	for i, b := range h.buckets {
-		if v <= b {
-			idx = i
-			break
+	if h.cur == nil {
+		if len(h.labelKeys) != 0 {
+			panic(fmt.Sprintf("histogram %s: Observe called on a labelled family; use With() first", h.name))
 		}
-		idx = i + 1
+		h.cur = h.vec.With(prometheus.Labels{})
 	}
-	// A value beyond the last bucket counts as overflow (no +Inf bucket by
-	// default; the +Inf line is derived as the total count).
-	for i := idx; i < len(counts); i++ {
-		counts[i]++
-	}
-	h.sums[h.fixed] += v
-	h.obs[h.fixed]++
+	h.cur.Observe(v)
 }
 
-// Registry holds all metric families.
+// Registry holds all metric families on a private client_golang registry.
 type Registry struct {
-	mu sync.Mutex
-	cs map[string]*Counter
-	hs map[string]*Histogram
+	mu  sync.Mutex
+	reg *prometheus.Registry
+	cs  map[string]*Counter
+	hs  map[string]*Histogram
 }
 
 func New() *Registry {
-	return &Registry{cs: map[string]*Counter{}, hs: map[string]*Histogram{}}
+	return &Registry{reg: prometheus.NewRegistry(), cs: map[string]*Counter{}, hs: map[string]*Histogram{}}
 }
 
 func (r *Registry) Counter(name, help string, labelKeys ...string) *Counter {
@@ -110,7 +106,14 @@ func (r *Registry) Counter(name, help string, labelKeys ...string) *Counter {
 	if c, ok := r.cs[name]; ok {
 		return c
 	}
-	c := &Counter{name: name, help: help, labelKeys: labelKeys, values: map[string]int64{}, mu: &sync.Mutex{}}
+	vec := prometheus.NewCounterVec(prometheus.CounterOpts{Name: name, Help: help}, labelKeys)
+	r.reg.MustRegister(vec)
+	if len(labelKeys) == 0 {
+		// Materialize the single unlabelled child so the family's HELP/TYPE
+		// lines are present in the exposition even before the first Inc.
+		vec.With(prometheus.Labels{})
+	}
+	c := &Counter{name: name, labelKeys: append([]string(nil), labelKeys...), mu: &sync.Mutex{}, vec: vec}
 	r.cs[name] = c
 	return c
 }
@@ -121,96 +124,27 @@ func (r *Registry) Histogram(name, help string, buckets []float64, labelKeys ...
 	if h, ok := r.hs[name]; ok {
 		return h
 	}
-	h := &Histogram{
-		name: name, help: help, labelKeys: labelKeys, buckets: append([]float64(nil), buckets...),
-		counts: map[string][]int64{}, sums: map[string]float64{}, obs: map[string]int64{}, mu: &sync.Mutex{},
+	vec := prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: name, Help: help, Buckets: append([]float64(nil), buckets...)}, labelKeys)
+	r.reg.MustRegister(vec)
+	if len(labelKeys) == 0 {
+		vec.With(prometheus.Labels{})
 	}
+	h := &Histogram{name: name, labelKeys: append([]string(nil), labelKeys...), mu: &sync.Mutex{}, vec: vec}
 	r.hs[name] = h
 	return h
 }
 
-// Render emits the registry in Prometheus text exposition format.
+// Handler returns the promhttp handler serving this registry in Prometheus
+// text exposition format (version 0.0.4).
+func (r *Registry) Handler() http.Handler {
+	return promhttp.HandlerFor(r.reg, promhttp.HandlerOpts{})
+}
+
+// Render returns the current exposition as a string (promhttp handler output).
 func (r *Registry) Render() string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	var b strings.Builder
-	cNames := make([]string, 0, len(r.cs))
-	for n := range r.cs {
-		cNames = append(cNames, n)
-	}
-	sort.Strings(cNames)
-	for _, n := range cNames {
-		c := r.cs[n]
-		fmt.Fprintf(&b, "# HELP %s %s\n# TYPE %s counter\n", n, c.help, n)
-		keys := make([]string, 0, len(c.values))
-		for k := range c.values {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			fmt.Fprintf(&b, "%s%s %d\n", n, labelSuffix(c.labelKeys, k), c.values[k])
-		}
-	}
-	hNames := make([]string, 0, len(r.hs))
-	for n := range r.hs {
-		hNames = append(hNames, n)
-	}
-	sort.Strings(hNames)
-	for _, n := range hNames {
-		h := r.hs[n]
-		fmt.Fprintf(&b, "# HELP %s %s\n# TYPE %s histogram\n", n, h.help, n)
-		keys := make([]string, 0, len(h.counts))
-		for k := range h.counts {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			counts := h.counts[k]
-			for i, upper := range h.buckets {
-				fmt.Fprintf(&b, "%s_bucket%s %d\n", n, labelSuffixWith(h.labelKeys, k, "le", fmt.Sprintf("%g", upper)), counts[i])
-			}
-			total := h.obs[k]
-			fmt.Fprintf(&b, "%s_bucket%s %d\n", n, labelSuffixWith(h.labelKeys, k, "le", "+Inf"), total)
-			fmt.Fprintf(&b, "%s_sum%s %g\n", n, labelSuffix(h.labelKeys, k), h.sums[k])
-			fmt.Fprintf(&b, "%s_count%s %d\n", n, labelSuffix(h.labelKeys, k), total)
-		}
-	}
-	return b.String()
-}
-
-// labelSuffix builds the `{k="v",...}` suffix for a metric line.
-func labelSuffix(labelKeys []string, key string) string {
-	return labelSuffixWith(labelKeys, key, "", "")
-}
-
-func labelSuffixWith(labelKeys []string, key, extraKey, extraVal string) string {
-	values := strings.Split(key, "\x00")
-	if len(values) != len(labelKeys) {
-		values = nil
-	}
-	var b strings.Builder
-	wrote := false
-	for i, k := range labelKeys {
-		if wrote {
-			b.WriteByte(',')
-		}
-		wrote = true
-		fmt.Fprintf(&b, "%s=\"%s\"", k, escape(values[i]))
-	}
-	if extraKey != "" {
-		if wrote {
-			b.WriteByte(',')
-		}
-		wrote = true
-		fmt.Fprintf(&b, "%s=\"%s\"", extraKey, escape(extraVal))
-	}
-	if !wrote {
-		return "" // no labels at all (unlabelled metric line)
-	}
-	b.WriteByte('}')
-	return "{" + b.String()
-}
-
-func escape(s string) string {
-	return strings.ReplaceAll(s, `"`, `\"`)
+	h := r.Handler()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	h.ServeHTTP(rec, req)
+	return rec.Body.String()
 }
