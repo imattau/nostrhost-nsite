@@ -67,3 +67,42 @@ func TestReleaseCacheShortCircuit(t *testing.T) {
 		t.Fatalf("negative short-circuit failed: %+v %v", got, err)
 	}
 }
+
+func TestReleaseFromCatalogueWithoutRelays(t *testing.T) {
+	ctx := context.Background()
+	pk := "b6c048759734c1ef1b3ba0acfd1cd862b394eaab1bc15b7bf6c7f357986d9732"
+	cat := &npk.Catalogue{
+		Releases: []nostr.Event{
+			{Kind: 9900, PubKey: pk, CreatedAt: 1_000_000, Tags: nostr.Tags{
+				{"d", "root/1.0.0/x86_64"}, {"v", "1"}, {"name", "root"},
+				{"version", "1.0.0"}, {"os", "linux"}, {"arch", "x86_64"},
+				{"format", "npk"}, {"x", "ab" + strings.Repeat("cd", 31)},
+			}},
+		},
+	}
+	mc := cache.NewManifestCache(time.Hour, time.Minute)
+	// No relays: the catalogue must be the only source of the release.
+	r := New([]string{}, mc, nil, 5000, cat)
+	got, err := r.Release(ctx, pk, "root")
+	if err != nil || got == nil || got.Version != "1.0.0" {
+		t.Fatalf("catalogue-backed release failed: %+v %v", got, err)
+	}
+	// A miss falls through to relays (none configured) and caches negatively.
+	if got, err := r.Release(ctx, pk, "missing"); err != nil || got != nil {
+		t.Fatalf("catalogue miss must fall through: %+v %v", got, err)
+	}
+	if !mc.Negative("release:" + pk + ":missing") {
+		t.Fatal("catalogue miss must cache negatively")
+	}
+}
+
+func TestReleaseIgnoresNilCatalogue(t *testing.T) {
+	ctx := context.Background()
+	pk := "b6c048759734c1ef1b3ba0acfd1cd862b394eaab1bc15b7bf6c7f357986d9732"
+	mc := cache.NewManifestCache(time.Hour, time.Minute)
+	// Explicit nil catalogue (default behaviour): no relays, no release.
+	r := New([]string{}, mc, nil, 5000, (*npk.Catalogue)(nil))
+	if got, err := r.Release(ctx, pk, "root"); err != nil || got != nil {
+		t.Fatalf("nil catalogue must behave like the relay-only path: %+v %v", got, err)
+	}
+}

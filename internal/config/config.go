@@ -55,6 +55,11 @@ type Npk struct {
 	Enabled    bool   `toml:"enabled"`
 	CachePath  string `toml:"cache_path"`
 	ReleaseTTL int    `toml:"release_ttl_seconds"`
+	// CataloguePath, when set, is the local catalogue.json produced by
+	// `npack refresh`. Release resolution consults it first and falls back to
+	// the lookup relays only on a miss, so an operator-refreshed catalogue
+	// removes per-request relay scans for npk-served sites.
+	CataloguePath string `toml:"catalogue_path"`
 }
 
 type Relays struct {
@@ -243,6 +248,16 @@ func (c *Config) Validate() error {
 		}
 		if c.Npk.ReleaseTTL <= 0 {
 			return fmt.Errorf("npk.release_ttl_seconds must be positive")
+		}
+	}
+	if c.Npk.CataloguePath != "" {
+		if !strings.HasSuffix(c.Npk.CataloguePath, ".json") {
+			return fmt.Errorf("npk.catalogue_path must end in .json")
+		}
+		// The catalogue is the operator's own refresh output; require an
+		// absolute path so it never resolves relative to the gateway's cwd.
+		if !strings.HasPrefix(c.Npk.CataloguePath, "/") {
+			return fmt.Errorf("npk.catalogue_path must be an absolute path")
 		}
 	}
 	if c.Limits.MaxBlobBytes > MaxAllowedBlobBytes {

@@ -177,8 +177,20 @@ func applyBackends(srv *server.Server, cfg *config.Config, log *slog.Logger) {
 		}
 		log.Info("npk bundle store ready", "cache", cfg.Npk.CachePath)
 	}
+	// Optional local npack catalogue: `npack refresh` output that backs
+	// release resolution without a relay round trip. A missing file is not an
+	// error (falls back to relays); a parse failure logs and also falls back.
+	var catalogue *npk.Catalogue
+	if cfg.Npk.CataloguePath != "" {
+		catalogue, err = npk.LoadCatalogue(cfg.Npk.CataloguePath)
+		if err != nil {
+			log.Warn("npk catalogue unavailable; release resolution falls back to relays", "path", cfg.Npk.CataloguePath, "err", err)
+		} else if catalogue != nil {
+			log.Info("npk catalogue loaded", "path", cfg.Npk.CataloguePath, "created_at", catalogue.CreatedAt)
+		}
+	}
 	srv.Configure(server.Backends{
-		Resolver: resolve.New(relays, mcache, nil, cfg.Limits.MaxPathsPerManifest),
+		Resolver: resolve.New(relays, mcache, nil, cfg.Limits.MaxPathsPerManifest, catalogue),
 		Fetcher: blossom.New(blossom.Options{
 			AllowHTTP: cfg.Blossom.AllowHTTP,
 			AllowLoopback: os.Getenv("NSITE_ALLOW_LOOPBACK_RELAYS") == "1", // testbed only

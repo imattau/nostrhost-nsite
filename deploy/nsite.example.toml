@@ -38,6 +38,18 @@ enabled = false                       # resolve publisher kind-9900 releases and
 cache_path = "/var/cache/nostrhost-nsite/npk"
 release_ttl_seconds = 300
 
+# Optional local npack catalogue (`npack refresh` output). When set, release
+# resolution consults this file first and only falls back to the lookup
+# relays on a miss, so an operator-refreshed catalogue removes per-request
+# relay scans for npk-served sites. Refresh with:
+#
+#   npack refresh --store /var/cache/nostrhost-nsite/npk \
+#     --relay wss://relay.damus.io --relay wss://nos.lol
+#
+# then `systemctl reload nostrhost-nsite`. A missing or unreadable file is
+# never fatal; the gateway logs and falls back to relays.
+# catalogue_path = "/var/cache/nostrhost-nsite/npk/catalogue.json"
+
 [limits]                              # §4.4 hosted-mode defaults
 max_blob_bytes = 33554432             # 32 MiB (cap 128 MiB)
 fetch_timeout_seconds = 20

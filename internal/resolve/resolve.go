@@ -20,10 +20,18 @@ type Resolver struct {
 	mcache    *cache.ManifestCache
 	forbidden map[string]struct{}
 	maxPaths  int
+	// catalogue is the optional local npack catalogue (npack refresh). When
+	// set, release resolution consults it before the relays; nil keeps the
+	// relay-only behaviour.
+	catalogue *npk.Catalogue
 }
 
-func New(relays []string, mcache *cache.ManifestCache, forbidden map[string]struct{}, maxPaths int) *Resolver {
-	return &Resolver{relays: relays, mcache: mcache, forbidden: forbidden, maxPaths: maxPaths}
+func New(relays []string, mcache *cache.ManifestCache, forbidden map[string]struct{}, maxPaths int, catalogue ...*npk.Catalogue) *Resolver {
+	var cat *npk.Catalogue
+	if len(catalogue) > 0 {
+		cat = catalogue[0]
+	}
+	return &Resolver{relays: relays, mcache: mcache, forbidden: forbidden, maxPaths: maxPaths, catalogue: cat}
 }
 
 // Relays exposes the configured lookup set (for diagnostics/tests).
@@ -82,9 +90,11 @@ func (r *Resolver) BlossomServers(ctx context.Context, pubkey string) []string {
 	return servers
 }
 
-// Release resolves the newest valid kind-9900 release of publisher/name from
-// the lookup relays, with the same positive/negative cache as manifests.
-// Returns (nil, nil) when no valid, unrevoked release is found.
+// Release resolves the newest valid kind-9900 release of publisher/name. When
+// a local npack catalogue is configured it is consulted first (no relay round
+// trip); on a miss the lookup relays are queried, with the same positive/
+// negative cache as manifests. Returns (nil, nil) when no valid, unrevoked
+// release is found.
 func (r *Resolver) Release(ctx context.Context, publisher, name string) (*npk.Release, error) {
 	key := "release:" + publisher + ":" + name
 	if cached, ok := r.mcache.Get(key); ok {
@@ -95,6 +105,12 @@ func (r *Resolver) Release(ctx context.Context, publisher, name string) (*npk.Re
 	}
 	if r.mcache.Negative(key) {
 		return nil, nil
+	}
+	if r.catalogue != nil {
+		if rel := r.catalogue.Newest(publisher, name); rel != nil {
+			r.mcache.Put(key, rel)
+			return rel, nil
+		}
 	}
 	rel, err := npk.NewestRelease(ctx, r.relays, publisher, name)
 	if err != nil {

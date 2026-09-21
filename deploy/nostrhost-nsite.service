@@ -29,7 +29,9 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 ReadWritePaths=/var/cache/nostrhost-nsite
 # The optional local Blossom server (D4) stores blobs under its state
 # directory, so /var/lib/nostrhost-nsite must be writable when [blossom.local]
-# is enabled.
+# is enabled. The npack catalogue (npk.catalogue_path) is refreshed by the
+# operator (`npack refresh --store /var/cache/nostrhost-nsite/npk`) and only
+# read by this service; the cache dir above is the refresh target.
 ReadWritePaths=/var/lib/nostrhost-nsite
 # The gateway's own listeners and Caddy both live on loopback, so a blanket
 # IPAddressDeny=127.0.0.0/8 would break the Caddy->gateway path. SSRF defence

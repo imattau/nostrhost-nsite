@@ -159,6 +159,33 @@ d = ""
 	}
 }
 
+func TestLoadNpkCataloguePath(t *testing.T) {
+	base := `[[sites]]
+pubkey = "b6c048759734c1ef1b3ba0acfd1cd862b394eaab1bc15b7bf6c7f357986d9732"
+kind = 15128
+d = ""
+`
+	// A valid absolute .json path loads and is applied.
+	body := strings.Replace(validTOML, base, "[npk]\ncatalogue_path = \"/var/cache/nostrhost-nsite/npk/catalogue.json\"\n\n"+base, 1)
+	cfg, err := Load(writeTemp(t, body))
+	if err != nil {
+		t.Fatalf("catalogue_path must load, got %v", err)
+	}
+	if cfg.Npk.CataloguePath != "/var/cache/nostrhost-nsite/npk/catalogue.json" {
+		t.Errorf("catalogue_path not applied: %+v", cfg.Npk)
+	}
+	// Non-.json suffix is rejected.
+	body = strings.Replace(validTOML, base, "[npk]\ncatalogue_path = \"/var/cache/nostrhost-nsite/npk/catalogue\"\n\n"+base, 1)
+	if _, err := Load(writeTemp(t, body)); err == nil {
+		t.Error("catalogue_path without .json must be rejected")
+	}
+	// Relative path is rejected.
+	body = strings.Replace(validTOML, base, "[npk]\ncatalogue_path = \"catalogue.json\"\n\n"+base, 1)
+	if _, err := Load(writeTemp(t, body)); err == nil {
+		t.Error("relative catalogue_path must be rejected")
+	}
+}
+
 func TestLoadRejectsOversizeBlob(t *testing.T) {
 	body := strings.Replace(validTOML, `max_blob_bytes = 33554432`, `max_blob_bytes = 268435456`, 1)
 	if _, err := Load(writeTemp(t, body)); err == nil {
