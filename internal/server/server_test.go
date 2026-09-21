@@ -139,7 +139,7 @@ func TestOpenModeStillDeniesSnapshotAndGarbage(t *testing.T) {
 func TestOpenModeStatusReportsMode(t *testing.T) {
 	s := openServer(t)
 	rr := do(s, "internal", "127.0.0.1", "/internal/status")
-	if body := rr.Body.String(); body != `{"domain":"sites.example.org","mode":"open","allowlisted_sites":0,"custom_domains":0,"cache_bytes":0}` {
+	if body := rr.Body.String(); body != `{"domain":"sites.example.org","mode":"open","allowlisted_sites":0,"custom_domains":0,"cache_bytes":0,"npk_enabled":false}` {
 		t.Errorf("status body = %s", body)
 	}
 }
@@ -158,7 +158,7 @@ func TestStatusJSON(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status: got %d", rr.Code)
 	}
-	if body := rr.Body.String(); body != `{"domain":"sites.example.org","mode":"hosted","allowlisted_sites":1,"custom_domains":0,"cache_bytes":0}` {
+	if body := rr.Body.String(); body != `{"domain":"sites.example.org","mode":"hosted","allowlisted_sites":1,"custom_domains":0,"cache_bytes":0,"npk_enabled":false}` {
 		t.Fatalf("status body: %s", body)
 	}
 }

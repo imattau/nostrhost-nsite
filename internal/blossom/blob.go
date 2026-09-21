@@ -27,15 +27,22 @@ var ErrForbidden = errors.New("forbidden address")
 type Options struct {
 	AllowHTTP     bool
 	AllowLoopback bool // test/local tooling only; production never sets this
-	MaxBytes      int64
-	Timeout       time.Duration
-	MaxRedirects  int
+	// AllowLoopbackAddrs is the D4 targeted loopback allowance: exact
+	// host:port addresses the fetch boundary permits even though they are
+	// loopback. Only the operator-configured local Blossom server may appear
+	// here (the gateway renders it from [blossom.local]); everything else
+	// keeps the strict resolved-IP boundary.
+	AllowLoopbackAddrs []string
+	MaxBytes           int64
+	Timeout            time.Duration
+	MaxRedirects       int
 }
 
 // Fetcher is safe to use concurrently.
 type Fetcher struct {
 	allowHTTP     bool
 	allowLoopback bool
+	allowAddrs    map[string]struct{}
 	maxBytes      int64
 	timeout       time.Duration
 	client        *http.Client
@@ -45,15 +52,24 @@ type Fetcher struct {
 // called by net.Dialer AFTER DNS resolution, with the actual address being
 // connected to — so DNS rebinding (a name that flips to a private IP after
 // resolution) is defeated here: the private address is refused regardless of
-// what the name resolved to earlier. allowLoopback is test/local tooling only.
-func checkDialAddr(network, addr string, allowLoopback bool) error {
+// what the name resolved to earlier. allowLoopback is test/local tooling only;
+// allowAddrs grants the D4 targeted loopback exception for the exact
+// configured local Blossom server address.
+func checkDialAddr(network, addr string, allowLoopback bool, allowAddrs map[string]struct{}) error {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		return err
 	}
-	ip := net.ParseIP(host)
-	if ip != nil && !(allowLoopback && ip.IsLoopback()) && forbiddenIP(ip) {
-		return ErrForbidden
+	if ip := net.ParseIP(host); ip != nil {
+		if allowLoopback && ip.IsLoopback() {
+			return nil
+		}
+		if _, ok := allowAddrs[addr]; ok && ip.IsLoopback() {
+			return nil
+		}
+		if forbiddenIP(ip) {
+			return ErrForbidden
+		}
 	}
 	return nil
 }
@@ -69,10 +85,14 @@ func New(opts Options) *Fetcher {
 		opts.MaxRedirects = 3
 	}
 	allowLoopback := opts.AllowLoopback
+	allowAddrs := make(map[string]struct{}, len(opts.AllowLoopbackAddrs))
+	for _, a := range opts.AllowLoopbackAddrs {
+		allowAddrs[a] = struct{}{}
+	}
 	dialer := &net.Dialer{
 		Timeout: 10 * time.Second,
 		Control: func(network, addr string, _ syscall.RawConn) error {
-			return checkDialAddr(network, addr, allowLoopback)
+			return checkDialAddr(network, addr, allowLoopback, allowAddrs)
 		},
 	}
 	transport := &http.Transport{
@@ -86,6 +106,7 @@ func New(opts Options) *Fetcher {
 	return &Fetcher{
 		allowHTTP:     opts.AllowHTTP,
 		allowLoopback: allowLoopback,
+		allowAddrs:    allowAddrs,
 		maxBytes:      opts.MaxBytes,
 		timeout:       opts.Timeout,
 		client: &http.Client{

@@ -24,6 +24,7 @@ import (
 	"github.com/imattau/nostrhost-nsite/internal/config"
 	"github.com/imattau/nostrhost-nsite/internal/metrics"
 	"github.com/imattau/nostrhost-nsite/internal/nip5a"
+	"github.com/imattau/nostrhost-nsite/internal/npk"
 	"github.com/imattau/nostrhost-nsite/internal/resolve"
 )
 
@@ -32,6 +33,10 @@ type Backends struct {
 	Resolver *resolve.Resolver
 	Fetcher  *blossom.Fetcher
 	Blobs    *cache.BlobStore
+	// Npk is the optional single-artifact bundle store. When set, serveSite
+	// tries the site's npack release first (fetch + unpack + serve from the
+	// bundle) and falls back to per-path Blossom blobs on any miss.
+	Npk *npk.BundleStore
 }
 
 type Server struct {
@@ -319,8 +324,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if s.be.Blobs != nil {
 		cacheBytes = s.be.Blobs.Used()
 	}
+	npkEnabled := s.cfg.Npk.Enabled && s.be.Npk != nil
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = fmt.Fprintf(w, `{"domain":%q,"mode":%q,"allowlisted_sites":%d,"custom_domains":%d,"cache_bytes":%d}`, s.cfg.Domain, s.cfg.Mode, len(s.allow), len(s.custom), cacheBytes)
+	_, _ = fmt.Fprintf(w, `{"domain":%q,"mode":%q,"allowlisted_sites":%d,"custom_domains":%d,"cache_bytes":%d,"npk_enabled":%v}`, s.cfg.Domain, s.cfg.Mode, len(s.allow), len(s.custom), cacheBytes, npkEnabled)
 }
 
 // serveSite resolves the manifest, matches the path, fetches and verifies the
@@ -348,19 +354,88 @@ func (s *Server) serveSite(w http.ResponseWriter, r *http.Request, siteType nip5
 		}
 	}
 	sha, ok := paths[path]
+	status := http.StatusOK
 	if !ok {
 		// NIP-5A "Not Found": fall back to /404.html if the manifest has one.
-		if fallback, has := paths["/404.html"]; has {
-			sha, ok = fallback, true
-		}
-		if !ok {
+		fallback, has := paths["/404.html"]
+		if !has {
 			http.NotFound(w, r)
 			return
 		}
-		s.serveBlob(w, r, be, event, sha, "/404.html", http.StatusNotFound)
+		sha, ok = fallback, true
+		status = http.StatusNotFound
+		path = "/404.html"
+	}
+	if !ok {
+		http.NotFound(w, r)
 		return
 	}
-	s.serveBlob(w, r, be, event, sha, path, http.StatusOK)
+
+	// Try the single-artifact npk bundle first (Phase 3). If the site has a
+	// release whose bundle is already unpacked, serve the path straight from
+	// it; otherwise fall back to per-path Blossom fetching.
+	if be.Npk != nil {
+		if served := s.serveFromNpk(w, r, be, siteType, event, sha, path, status); served {
+			return
+		}
+	}
+	s.serveBlob(w, r, be, event, sha, path, status)
+}
+
+// serveFromNpk attempts to serve a path from the site's npk bundle. It returns
+// true when the request has been answered (from the bundle or a bounded 404),
+// false when no release/bundle exists and per-path Blossom should be tried.
+func (s *Server) serveFromNpk(w http.ResponseWriter, r *http.Request, be Backends, siteType nip5a.SiteType, event *nostr.Event, sha, path string, status int) bool {
+	name := npk.NameRoot
+	if siteType == nip5a.SiteNamed {
+		name = namedSiteD(event)
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	release, err := be.Resolver.Release(ctx, event.PubKey, name)
+	if err != nil || release == nil {
+		return false
+	}
+	if be.Npk.Has(release.SHA256) {
+		body, err := be.Npk.Open(release.SHA256, path)
+		if err != nil {
+			s.log.Debug("npk bundle member missing", "sha", release.SHA256[:12], "path", path, "err", err)
+			http.NotFound(w, r)
+			return true
+		}
+		s.serveBytes(w, r, sha, path, body, status)
+		return true
+	}
+
+	servers := serverHints(event.Tags)
+	if len(servers) == 0 && be.Resolver != nil {
+		servers = be.Resolver.BlossomServers(ctx, event.PubKey)
+	}
+	body, err := fetchFirst(ctx, be.Fetcher, servers, release.SHA256)
+	if err != nil || len(body) == 0 {
+		s.fetchFailures.With(blossom.ClassifyFetchError(err)).Inc()
+		return false
+	}
+	if _, err := be.Npk.Unpack(release.SHA256, body); err != nil {
+		s.log.Debug("npk unpack failed", "sha", release.SHA256[:12], "err", err)
+		return false
+	}
+	bundleBody, err := be.Npk.Open(release.SHA256, path)
+	if err != nil {
+		http.NotFound(w, r)
+		return true
+	}
+	s.serveBytes(w, r, sha, path, bundleBody, status)
+	return true
+}
+
+func namedSiteD(event *nostr.Event) string {
+	for _, t := range event.Tags {
+		if len(t) >= 2 && t[0] == "d" {
+			return t[1]
+		}
+	}
+	return ""
 }
 
 // serveBlob streams a verified blob. Content-Type comes from the manifest path

@@ -139,6 +139,26 @@ func TestLoadRejectsPrivateBlossomWithoutAllowHTTP(t *testing.T) {
 	}
 }
 
+func TestLoadNpkEnabledRequiresCachePath(t *testing.T) {
+	base := `[[sites]]
+pubkey = "b6c048759734c1ef1b3ba0acfd1cd862b394eaab1bc15b7bf6c7f357986d9732"
+kind = 15128
+d = ""
+`
+	body := strings.Replace(validTOML, base, "[npk]\nenabled = true\ncache_path = \"\"\n\n"+base, 1)
+	if _, err := Load(writeTemp(t, body)); err == nil {
+		t.Error("npk.enabled with empty cache_path must be rejected")
+	}
+	body = strings.Replace(validTOML, base, "[npk]\nenabled = true\ncache_path = \"/var/cache/nostrhost-nsite/npk\"\n\n"+base, 1)
+	cfg, err := Load(writeTemp(t, body))
+	if err != nil {
+		t.Fatalf("npk.enabled with cache_path must load, got %v", err)
+	}
+	if !cfg.Npk.Enabled || cfg.Npk.CachePath != "/var/cache/nostrhost-nsite/npk" {
+		t.Errorf("npk config not applied: %+v", cfg.Npk)
+	}
+}
+
 func TestLoadRejectsOversizeBlob(t *testing.T) {
 	body := strings.Replace(validTOML, `max_blob_bytes = 33554432`, `max_blob_bytes = 268435456`, 1)
 	if _, err := Load(writeTemp(t, body)); err == nil {
@@ -165,5 +185,68 @@ func TestForbiddenHost(t *testing.T) {
 		if forbiddenHost(host) {
 			t.Errorf("%q must be allowed", host)
 		}
+	}
+}
+
+// TestLoadBlossomLocal pins the D4 local Blossom server config: enabled must
+// carry a loopback-only listener, a data dir, caps within the 128 MiB bound,
+// and the gateway default is disabled.
+func TestLoadBlossomLocal(t *testing.T) {
+	// Disabled by default, defaults applied.
+	cfg, err := Load(writeTemp(t, validTOML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Blossom.Local.Enabled {
+		t.Fatal("local Blossom must be disabled by default")
+	}
+	if cfg.Blossom.Local.Listen != DefaultBlossomListen {
+		t.Errorf("listen = %q, want %q", cfg.Blossom.Local.Listen, DefaultBlossomListen)
+	}
+	if cfg.Blossom.Local.QuotaBytes != DefaultBlossomQuota {
+		t.Errorf("quota = %d, want %d", cfg.Blossom.Local.QuotaBytes, DefaultBlossomQuota)
+	}
+
+	// Enabled with a loopback listener loads.
+	body := validTOML + `
+[blossom.local]
+enabled = true
+listen = "127.0.0.1:8197"
+data_dir = "/var/lib/nostrhost-nsite/blossom"
+`
+	cfg, err = Load(writeTemp(t, body))
+	if err != nil {
+		t.Fatalf("enabled local Blossom must load: %v", err)
+	}
+	if !cfg.Blossom.Local.Enabled {
+		t.Fatal("local Blossom not enabled")
+	}
+
+	// Non-loopback listener is rejected (D4). 127.0.0.2 is within loopback
+	// 127.0.0.0/8 and therefore allowed; only genuinely external binds are.
+	bad := []string{"0.0.0.0:8197", "10.0.0.1:8197", "example.org:8197"}
+	for _, listen := range bad {
+		b := strings.Replace(body, `listen = "127.0.0.1:8197"`, `listen = "`+listen+`"`, 1)
+		if _, err := Load(writeTemp(t, b)); err == nil {
+			t.Errorf("listen %q must be rejected (D4)", listen)
+		}
+	}
+
+	// Missing data_dir is rejected when enabled.
+	b := strings.Replace(body, `data_dir = "/var/lib/nostrhost-nsite/blossom"`, `data_dir = ""`, 1)
+	if _, err := Load(writeTemp(t, b)); err == nil {
+		t.Error("empty data_dir must be rejected when enabled")
+	}
+
+	// Oversize max_blob_bytes is rejected.
+	b = strings.Replace(body, `data_dir = "/var/lib/nostrhost-nsite/blossom"`, "data_dir = \"/var/lib/nostrhost-nsite/blossom\"\nmax_blob_bytes = 268435456", 1)
+	if _, err := Load(writeTemp(t, b)); err == nil {
+		t.Error("blossom.local.max_blob_bytes over 128 MiB must be rejected")
+	}
+
+	// Bad admitted pubkey is rejected.
+	b = strings.Replace(body, `data_dir = "/var/lib/nostrhost-nsite/blossom"`, "data_dir = \"/var/lib/nostrhost-nsite/blossom\"\nallow_pubkeys = [\"abc\"]", 1)
+	if _, err := Load(writeTemp(t, b)); err == nil {
+		t.Error("short allow_pubkeys entry must be rejected")
 	}
 }

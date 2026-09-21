@@ -49,7 +49,7 @@ func TestCheckDialAddr(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := checkDialAddr("tcp", tc.addr, tc.allow)
+			err := checkDialAddr("tcp", tc.addr, tc.allow, nil)
 			if tc.want {
 				if err != nil {
 					t.Fatalf("expected allowed, got %v", err)
@@ -63,6 +63,29 @@ func TestCheckDialAddr(t *testing.T) {
 	}
 }
 
+// TestCheckDialAddrTargetedLoopback pins the D4 allowance: the fetch boundary
+// opens a loopback connection ONLY for the exact host:port the operator
+// configured as the local Blossom server. Every other loopback address stays
+// refused, so the local server is the single permitted loopback destination.
+func TestCheckDialAddrTargetedLoopback(t *testing.T) {
+	allow := map[string]struct{}{"127.0.0.1:8197": {}}
+	if err := checkDialAddr("tcp", "127.0.0.1:8197", false, allow); err != nil {
+		t.Fatalf("configured local Blossom addr must be allowed: %v", err)
+	}
+	// A different port on the same loopback host is still refused.
+	if err := checkDialAddr("tcp", "127.0.0.1:8195", false, allow); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("other loopback port must stay refused, got %v", err)
+	}
+	// A different loopback host is still refused.
+	if err := checkDialAddr("tcp", "127.0.0.2:8197", false, allow); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("other loopback host must stay refused, got %v", err)
+	}
+	// Public addresses remain allowed.
+	if err := checkDialAddr("tcp", "93.184.216.34:443", false, allow); err != nil {
+		t.Fatalf("public addr must stay allowed: %v", err)
+	}
+}
+
 // TestDNSRebindingBlocked documents the defence-in-depth against DNS
 // rebinding: the dial control runs on the *resolved* address, so a name that
 // first resolves to a public IP (passing a resolve-time allowlist) and then
@@ -70,11 +93,11 @@ func TestCheckDialAddr(t *testing.T) {
 // private address. There is no resolve-then-connect race to exploit.
 func TestDNSRebindingBlocked(t *testing.T) {
 	// The attacker's name has "rebound" to 10.0.0.66 by the time we dial.
-	if err := checkDialAddr("tcp", "10.0.0.66:443", false); !errors.Is(err, ErrForbidden) {
+	if err := checkDialAddr("tcp", "10.0.0.66:443", false, nil); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("post-rebind private dial must be refused, got %v", err)
 	}
 	// Same for the cloud metadata address.
-	if err := checkDialAddr("tcp", "169.254.169.254:80", false); !errors.Is(err, ErrForbidden) {
+	if err := checkDialAddr("tcp", "169.254.169.254:80", false, nil); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("metadata dial must be refused, got %v", err)
 	}
 }

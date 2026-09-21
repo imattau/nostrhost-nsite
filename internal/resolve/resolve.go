@@ -11,6 +11,7 @@ import (
 
 	"github.com/imattau/nostrhost-nsite/internal/cache"
 	"github.com/imattau/nostrhost-nsite/internal/nip5a"
+	"github.com/imattau/nostrhost-nsite/internal/npk"
 )
 
 // Resolver resolves manifests and author metadata from public relays.
@@ -79,6 +80,32 @@ func (r *Resolver) BlossomServers(ctx context.Context, pubkey string) []string {
 		}
 	}
 	return servers
+}
+
+// Release resolves the newest valid kind-9900 release of publisher/name from
+// the lookup relays, with the same positive/negative cache as manifests.
+// Returns (nil, nil) when no valid, unrevoked release is found.
+func (r *Resolver) Release(ctx context.Context, publisher, name string) (*npk.Release, error) {
+	key := "release:" + publisher + ":" + name
+	if cached, ok := r.mcache.Get(key); ok {
+		if rel, isRel := cached.(*npk.Release); isRel {
+			return rel, nil
+		}
+		return nil, nil
+	}
+	if r.mcache.Negative(key) {
+		return nil, nil
+	}
+	rel, err := npk.NewestRelease(ctx, r.relays, publisher, name)
+	if err != nil {
+		return nil, err
+	}
+	if rel == nil {
+		r.mcache.PutNegative(key)
+		return nil, nil
+	}
+	r.mcache.Put(key, rel)
+	return rel, nil
 }
 
 // newestEvent subscribes to relays with the given filter and returns the

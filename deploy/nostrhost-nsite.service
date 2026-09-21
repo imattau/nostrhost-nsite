@@ -27,6 +27,10 @@ LockPersonality=true
 RestrictSUIDSGID=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 ReadWritePaths=/var/cache/nostrhost-nsite
+# The optional local Blossom server (D4) stores blobs under its state
+# directory, so /var/lib/nostrhost-nsite must be writable when [blossom.local]
+# is enabled.
+ReadWritePaths=/var/lib/nostrhost-nsite
 # The gateway's own listeners and Caddy both live on loopback, so a blanket
 # IPAddressDeny=127.0.0.0/8 would break the Caddy->gateway path. SSRF defence
 # (rejecting loopback/private upstreams at connect time) is enforced by the

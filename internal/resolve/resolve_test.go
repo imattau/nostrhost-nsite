@@ -2,6 +2,7 @@ package resolve
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 
 	"github.com/imattau/nostrhost-nsite/internal/cache"
 	"github.com/imattau/nostrhost-nsite/internal/nip5a"
+	"github.com/imattau/nostrhost-nsite/internal/npk"
 )
 
 func TestKeyAndFilter(t *testing.T) {
@@ -46,5 +48,22 @@ func TestManifestCacheShortCircuit(t *testing.T) {
 	mc.PutNegative("root:unknown")
 	if got, err := r.Manifest(ctx, nip5a.SiteRoot, "unknown", "", ""); err != nil || got != nil {
 		t.Fatalf("negative short-circuit failed: %v %v", got, err)
+	}
+}
+
+func TestReleaseCacheShortCircuit(t *testing.T) {
+	ctx := context.Background()
+	pk := "b6c048759734c1ef1b3ba0acfd1cd862b394eaab1bc15b7bf6c7f357986d9732"
+	mc := cache.NewManifestCache(time.Hour, time.Minute)
+	rel := &npk.Release{Publisher: pk, Name: "root", Version: "1.0.0", SHA256: "ab" + strings.Repeat("cd", 31)}
+	mc.Put("release:"+pk+":root", rel)
+	r := New([]string{}, mc, nil, 5000) // no relays: cache must be the only path
+	got, err := r.Release(ctx, pk, "root")
+	if err != nil || got == nil || got.SHA256 != rel.SHA256 {
+		t.Fatalf("release cache short-circuit failed: %+v %v", got, err)
+	}
+	mc.PutNegative("release:" + pk + ":missing")
+	if got, err := r.Release(ctx, pk, "missing"); err != nil || got != nil {
+		t.Fatalf("negative short-circuit failed: %+v %v", got, err)
 	}
 }

@@ -27,6 +27,10 @@ const (
 	DefaultMaxRedirects     = 3
 	DefaultCacheQuotaBytes  = 2147483648 // 2 GiB
 	DefaultMaxPaths         = 5000
+	// D4 defaults for the optional local Blossom server.
+	DefaultBlossomListen    = "127.0.0.1:8197"
+	DefaultBlossomQuota     = 1 << 30 // 1 GiB
+	DefaultBlossomRetention = 30      // days
 )
 
 type Config struct {
@@ -37,9 +41,20 @@ type Config struct {
 	CachePath      string         `toml:"cache_path"`
 	Relays         Relays         `toml:"relays"`
 	Blossom        Blossom        `toml:"blossom"`
+	Npk            Npk            `toml:"npk"`
 	Limits         Limits         `toml:"limits"`
 	Sites          []Site         `toml:"sites"`
 	CustomDomains  []CustomDomain `toml:"custom_domains"`
+}
+
+// Npk controls single-artifact nsite distribution (Phase 3): when enabled the
+// gateway resolves the site publisher's npack release, fetches the .npk from
+// Blossom, unpacks it into a content-addressed cache and serves paths from it,
+// falling back to per-path blobs.
+type Npk struct {
+	Enabled    bool   `toml:"enabled"`
+	CachePath  string `toml:"cache_path"`
+	ReleaseTTL int    `toml:"release_ttl_seconds"`
 }
 
 type Relays struct {
@@ -52,6 +67,26 @@ type Relays struct {
 type Blossom struct {
 	FallbackServers []string `toml:"fallback_servers"`
 	AllowHTTP       bool     `toml:"allow_http"`
+	// Local is the optional in-process Blossom server (Phase 5, D4). It is
+	// disabled by default; when enabled the gateway serves BUD-01/BUD-02 on
+	// its own loopback listener and grants the fetch boundary an explicit
+	// allowance for that exact address.
+	Local BlossomLocal `toml:"local"`
+}
+
+// BlossomLocal configures the optional local Blossom server (D4): a
+// content-addressed store with its own quota, per-blob cap and retention
+// contract. It listens on loopback only; Caddy or the gateway routes it to the
+// public. allow_pubkeys, when non-empty, admits uploads signed by exactly
+// those keys (kind-24242 BUD-02 auth); empty admits any valid auth event.
+type BlossomLocal struct {
+	Enabled       bool     `toml:"enabled"`
+	Listen        string   `toml:"listen"`
+	DataDir       string   `toml:"data_dir"`
+	QuotaBytes    int64    `toml:"quota_bytes"`
+	MaxBlobBytes  int64    `toml:"max_blob_bytes"`
+	RetentionDays int      `toml:"retention_days"`
+	AllowPubkeys  []string `toml:"allow_pubkeys"`
 }
 
 type Limits struct {
@@ -90,6 +125,19 @@ func Defaults() *Config {
 		PublicListen:   "127.0.0.1:8195",
 		InternalListen: "127.0.0.1:8196",
 		CachePath:      "/var/cache/nostrhost-nsite",
+		Blossom: Blossom{
+			Local: BlossomLocal{
+				Listen:        DefaultBlossomListen,
+				DataDir:       "/var/lib/nostrhost-nsite/blossom",
+				QuotaBytes:    DefaultBlossomQuota,
+				MaxBlobBytes:  DefaultMaxBlobBytes,
+				RetentionDays: DefaultBlossomRetention,
+			},
+		},
+		Npk: Npk{
+			CachePath:  "/var/cache/nostrhost-nsite/npk",
+			ReleaseTTL: 300,
+		},
 		Relays: Relays{
 			Lookup:             []string{"wss://purplepag.es", "wss://user.kindpag.es"},
 			ManifestTTLSeconds: 300,
@@ -161,6 +209,40 @@ func (c *Config) Validate() error {
 	for _, s := range c.Blossom.FallbackServers {
 		if err := validateBlossomURL(s, c.Blossom.AllowHTTP); err != nil {
 			return fmt.Errorf("blossom server %q: %w", s, err)
+		}
+	}
+	if c.Blossom.Local.Enabled {
+		if err := validateListen(c.Blossom.Local.Listen); err != nil {
+			return fmt.Errorf("blossom.local.listen: %w", err)
+		}
+		// D4: the local server is a loopback-only destination. Accept a plain
+		// "127.0.0.1:port" or "localhost:port" (or "[::1]:port"); refuse
+		// anything that would bind or be reachable on a non-loopback address.
+		host, _, err := net.SplitHostPort(c.Blossom.Local.Listen)
+		if err != nil {
+			return fmt.Errorf("blossom.local.listen %q: %w", c.Blossom.Local.Listen, err)
+		}
+		if !isLoopbackHost(host) {
+			return fmt.Errorf("blossom.local.listen %q must be a loopback address (D4)", c.Blossom.Local.Listen)
+		}
+		if c.Blossom.Local.DataDir == "" {
+			return fmt.Errorf("blossom.local.data_dir is required when the local Blossom server is enabled")
+		}
+		if c.Blossom.Local.MaxBlobBytes > MaxAllowedBlobBytes {
+			return fmt.Errorf("blossom.local.max_blob_bytes %d exceeds %d (128 MiB)", c.Blossom.Local.MaxBlobBytes, MaxAllowedBlobBytes)
+		}
+		for _, k := range c.Blossom.Local.AllowPubkeys {
+			if len(k) != 64 {
+				return fmt.Errorf("blossom.local.allow_pubkeys: pubkey %q must be 64 hex chars", k)
+			}
+		}
+	}
+	if c.Npk.Enabled {
+		if c.Npk.CachePath == "" {
+			return fmt.Errorf("npk.cache_path is required when npk.enabled is true")
+		}
+		if c.Npk.ReleaseTTL <= 0 {
+			return fmt.Errorf("npk.release_ttl_seconds must be positive")
 		}
 	}
 	if c.Limits.MaxBlobBytes > MaxAllowedBlobBytes {
@@ -263,6 +345,20 @@ func validateBlossomURL(raw string, allowHTTP bool) error {
 	}
 	_, err := validateURL(raw, schemes, true)
 	return err
+}
+
+// isLoopbackHost reports whether host is a loopback literal or name.
+func isLoopbackHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") || strings.HasSuffix(strings.ToLower(host), ".localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // forbiddenHost reports loopback and private addresses. Hostnames that are
